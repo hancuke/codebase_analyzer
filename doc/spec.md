@@ -1,1997 +1,315 @@
-可以。按照你现在的目标，我建议**第一版不要做成一个“大而全的代码分析平台”**，而是先把下面这条链做扎实：
+# CodeGraph 设计规格
 
-```text
-Source / Function Chunks
-        │
-        ▼
-      Parser
-        │
-        ▼
-    Reference
-        │
-        ▼
-     Resolver
-        │
-        ▼
-Resolved Reference
-        │
-        ▼
- DependencyGraph
-        │
-        ├───────────────┐
-        ▼               ▼
-Entry Point          Change Impact
-    Analysis             Analysis
-        │               │
-        └───────┬───────┘
-                ▼
-        Analysis Context
-                │
-                ▼
-               LLM
-```
+## 它是什么
 
-下面这份可以直接作为第一版的 **Design Spec / Implementation Spec**。
+`codegraph` 用来回答一个简单的问题：
 
----
+> 当某个函数执行时，它会调用哪些其他函数？
 
-# Code Dependency Analysis Framework
+它读取一组源代码文件，找出函数之间的调用关系。之后可以：
 
-## 1. Overview
+* 从一个入口函数收集它需要的全部代码；
+* 找到某个函数被谁调用；
+* 文件修改后，找出哪些入口需要重新分析；
+* 将结果交给文档、LLM、RAG、CI 或其他上层程序。
 
-### 1.1 Goal
+这里的“函数”泛指可以执行的代码单元，例如 VBA 的 `Sub`、Java 的方法、PL/SQL 的 Procedure，或 Web Controller 的处理函数。
 
-构建一个轻量、可扩展的代码依赖分析框架，用于从已经拆分好的 function/method chunks 中：
+## 最简单的使用方式
 
-1. 解析函数之间的引用关系；
-2. 将引用解析到唯一的代码 Symbol；
-3. 构建直接依赖图；
-4. 根据入口函数递归获取完整依赖链；
-5. 当函数发生变化时，反向查找受影响的调用链；
-6. 为后续 LLM 分析提供准确、可控的代码上下文。
+调用者提供两类东西：
 
-第一版重点支持：
-
-* Microsoft Access VBA
-* Java
-* 后续可扩展 PL/SQL、Python、C# 等
-
----
-
-# 2. Design Principles
-
-第一版遵循以下原则。
-
-### 2.1 Simple First
-
-优先：
-
-> 简单、容易理解、容易测试、容易修改
-
-不提前引入：
-
-* Neo4j
-* NetworkX
-* AST framework abstraction
-* Graph database
-* distributed processing
-* complicated event system
-
-第一版使用 Python 标准数据结构即可实现。
-
----
-
-### 2.2 Direct Dependency Only
-
-Graph 只保存直接依赖：
-
-```text
-A → B
-B → C
-```
-
-不保存：
-
-```text
-A → C
-```
-
-间接依赖通过 DFS/BFS 查询。
-
----
-
-### 2.3 Parser 不负责 Resolve
-
-Parser 只回答：
-
-> 代码中出现了什么引用？
-
-Resolver 回答：
-
-> 这个引用实际指向哪个 Symbol？
-
-因此：
-
-```text
-Parser
-  ↓
-Reference
-  ↓
-Resolver
-  ↓
-Resolved Reference
-```
-
----
-
-### 2.4 Graph 不负责 Resolve
-
-DependencyGraph 只接受已经解析完成的：
-
-```text
-ResolvedReference
-```
-
-Graph 不知道 VBA、Java，也不负责名称解析。
-
----
-
-### 2.5 Code Graph 和 LLM Analysis 分离
-
-Dependency Graph：
-
-> 客观描述代码结构。
-
-LLM Analysis：
-
-> 理解代码含义和业务逻辑。
-
-不要把 LLM 分析结果混入 DependencyGraph。
-
----
-
-# 3. Architecture
-
-```text
-                    ┌─────────────────┐
-                    │ Function Chunks │
-                    └────────┬────────┘
-                             │
-                             ▼
-                    ┌─────────────────┐
-                    │     Parser      │
-                    └────────┬────────┘
-                             │
-                             ▼
-                    ┌─────────────────┐
-                    │    Reference    │
-                    └────────┬────────┘
-                             │
-                             ▼
-                    ┌─────────────────┐
-                    │    Resolver     │
-                    └────────┬────────┘
-                             │
-                             ▼
-                 ┌────────────────────────┐
-                 │  Resolved Reference    │
-                 └───────────┬────────────┘
-                             │
-                             ▼
-                 ┌────────────────────────┐
-                 │    DependencyGraph     │
-                 └───────────┬────────────┘
-                             │
-                ┌────────────┴────────────┐
-                ▼                         ▼
-       Entry Point Analysis        Change Impact
-                │                         │
-                └────────────┬────────────┘
-                             ▼
-                    Analysis Context
-                             │
-                             ▼
-                            LLM
-```
-
----
-
-# 4. Core Domain Model
-
-第一版只定义几个核心对象：
-
-```text
-Symbol
-SymbolId
-
-Reference
-ReferenceKind
-SourceLocation
-
-ResolveResult
-ResolveStatus
-
-ResolvedReference
-
-DependencyGraph
-```
-
----
-
-# 5. Symbol
-
-`Symbol` 表示一个代码中可以被引用的实体。
+1. **代码文件**；
+2. **语言前端**，即知道如何读取某种语言的插件。
 
 ```python
-from dataclasses import dataclass
-from enum import Enum
-
-
-class SymbolKind(Enum):
-    FUNCTION = "function"
-    METHOD = "method"
-    SUB = "sub"
-    EVENT = "event"
-    CLASS = "class"
-
-
-@dataclass(frozen=True)
-class SymbolId:
-    value: str
-
-
-@dataclass(frozen=True)
-class Symbol:
-    id: SymbolId
-    name: str
-    qualified_name: str
-    kind: SymbolKind
-    language: str
-    module: str
-    file: str
-```
-
-例如 VBA：
-
-```python
-Symbol(
-    id=SymbolId("vba:frmModiRec:bSave_Click"),
-    name="bSave_Click",
-    qualified_name="frmModiRec.bSave_Click",
-    kind=SymbolKind.EVENT,
-    language="vba",
-    module="frmModiRec",
-    file="frmModiRec.bas",
-)
-```
-
-Java：
-
-```python
-Symbol(
-    id=SymbolId("java:CustomerController:create"),
-    name="create",
-    qualified_name="CustomerController.create",
-    kind=SymbolKind.METHOD,
-    language="java",
-    module="CustomerController",
-    file="CustomerController.java",
-)
-```
-
----
-
-# 6. SymbolId
-
-必须区分：
-
-```text
-name
-```
-
-和：
-
-```text
-SymbolId
-```
-
-例如项目中可能存在：
-
-```text
-frmA.Validate
-frmB.Validate
-frmC.Validate
-```
-
-所以：
-
-```text
-Validate
-```
-
-不是唯一身份。
-
-而：
-
-```text
-vba:frmA:Validate
-```
-
-才是唯一身份。
-
-第一版可以直接使用字符串：
-
-```python
-SymbolId("vba:frmA:Validate")
-```
-
-以后如果需要再改成结构化 ID。
-
----
-
-# 7. SymbolRepository
-
-Resolver 需要查询所有 Symbol，因此需要一个非常简单的 Repository。
-
-```python
-from typing import Iterable, Protocol
-
-
-class SymbolRepository(Protocol):
-
-    def get(
-        self,
-        symbol_id: SymbolId,
-    ) -> Symbol | None:
-        ...
-
-    def find_by_name(
-        self,
-        name: str,
-    ) -> list[Symbol]:
-        ...
-
-    def add(
-        self,
-        symbol: Symbol,
-    ) -> None:
-        ...
-
-    def remove(
-        self,
-        symbol_id: SymbolId,
-    ) -> None:
-        ...
-```
-
-第一版实现：
-
-```python
-class InMemorySymbolRepository:
-
-    def __init__(self):
-        self._symbols: dict[SymbolId, Symbol] = {}
-        self._by_name: dict[str, list[SymbolId]] = {}
-
-    def add(self, symbol: Symbol) -> None:
-        self._symbols[symbol.id] = symbol
-
-        self._by_name.setdefault(
-            symbol.name,
-            [],
-        ).append(symbol.id)
-
-    def get(self, symbol_id: SymbolId):
-        return self._symbols.get(symbol_id)
-
-    def find_by_name(self, name: str):
-        ids = self._by_name.get(name, [])
-        return [
-            self._symbols[symbol_id]
-            for symbol_id in ids
-        ]
-
-    def remove(self, symbol_id: SymbolId) -> None:
-        symbol = self._symbols.pop(
-            symbol_id,
-            None,
-        )
-
-        if symbol is None:
-            return
-
-        ids = self._by_name.get(symbol.name, [])
-        if symbol_id in ids:
-            ids.remove(symbol_id)
-```
-
-这已经足够支撑第一版。
-
----
-
-# 8. Reference
-
-Reference 是 Parser 的输出。
-
-```python
-class ReferenceKind(Enum):
-    CALL = "call"
-    EVENT = "event"
-    INHERIT = "inherit"
-    IMPLEMENT = "implement"
-    USE = "use"
-```
-
-第一版只需要：
-
-```text
-CALL
-```
-
-然后：
-
-```python
-@dataclass(frozen=True)
-class SourceLocation:
-    file: str
-    line: int
-    column: int | None = None
-```
-
-Reference：
-
-```python
-@dataclass(frozen=True)
-class Reference:
-    source: SymbolId
-    target_name: str
-    kind: ReferenceKind
-    location: SourceLocation | None = None
-```
-
-例如：
-
-```python
-Reference(
-    source=SymbolId(
-        "vba:frmModiRec:bSave_Click"
-    ),
-    target_name="Validate",
-    kind=ReferenceKind.CALL,
-    location=SourceLocation(
-        file="frmModiRec.bas",
-        line=10,
-    ),
-)
-```
-
-注意：
-
-```text
-target_name = Validate
-```
-
-而不是：
-
-```text
-target = frmModiRec.Validate
-```
-
-因为 Resolver 还没有完成。
-
----
-
-# 9. Parser
-
-Parser 的唯一职责：
-
-> 从一个 Symbol 的 source code 中提取 Reference。
-
-接口：
-
-```python
-class Parser(Protocol):
-
-    def parse(
-        self,
-        symbol: Symbol,
-        source: str,
-    ) -> list[Reference]:
-        ...
-```
-
----
-
-# 10. VBA Parser
-
-第一版不需要追求完整 VBA AST。
-
-可以先使用：
-
-* regex
-* keyword filtering
-* 已知 symbol table
-
-例如：
-
-```python
-class VbaParser:
-
-    def parse(
-        self,
-        symbol: Symbol,
-        source: str,
-    ) -> list[Reference]:
-
-        references = []
-
-        for line_no, line in enumerate(
-            source.splitlines(),
-            start=1,
-        ):
-            calls = self._extract_calls(line)
-
-            for name in calls:
-                references.append(
-                    Reference(
-                        source=symbol.id,
-                        target_name=name,
-                        kind=ReferenceKind.CALL,
-                        location=SourceLocation(
-                            file=symbol.file,
-                            line=line_no,
-                        ),
-                    )
-                )
-
-        return references
-```
-
-第一版可以从你现在已有的：
-
-```text
-CodeScanner.extract_dependencies()
-```
-
-迁移过来。
-
-不要为了新架构重新发明 Parser。
-
----
-
-# 11. Resolver
-
-Resolver 的职责：
-
-> 将 Reference 解析为具体 Symbol。
-
-接口：
-
-```python
-class Resolver(Protocol):
-
-    def resolve(
-        self,
-        reference: Reference,
-        repository: SymbolRepository,
-    ) -> "ResolveResult":
-        ...
-```
-
----
-
-# 12. ResolveResult
-
-不要简单：
-
-```python
-Symbol | None
-```
-
-因为现实世界存在：
-
-```text
-resolved
-unresolved
-ambiguous
-external
-```
-
-定义：
-
-```python
-class ResolveStatus(Enum):
-    RESOLVED = "resolved"
-    UNRESOLVED = "unresolved"
-    AMBIGUOUS = "ambiguous"
-    EXTERNAL = "external"
-```
-
-然后：
-
-```python
-@dataclass(frozen=True)
-class ResolveResult:
-    status: ResolveStatus
-    target: SymbolId | None = None
-    candidates: tuple[SymbolId, ...] = ()
-    reason: str | None = None
-```
-
----
-
-# 13. 最简单的 Resolver
-
-第一版可以非常简单：
-
-```python
-class SimpleResolver:
-
-    def resolve(
-        self,
-        reference: Reference,
-        repository: SymbolRepository,
-    ) -> ResolveResult:
-
-        candidates = repository.find_by_name(
-            reference.target_name
-        )
-
-        if not candidates:
-            return ResolveResult(
-                status=ResolveStatus.UNRESOLVED,
-                reason=(
-                    f"Symbol not found: "
-                    f"{reference.target_name}"
-                ),
-            )
-
-        if len(candidates) > 1:
-            return ResolveResult(
-                status=ResolveStatus.AMBIGUOUS,
-                candidates=tuple(
-                    symbol.id
-                    for symbol in candidates
-                ),
-            )
-
-        return ResolveResult(
-            status=ResolveStatus.RESOLVED,
-            target=candidates[0].id,
-        )
-```
-
-这就是第一版。
-
-**不要一开始就设计复杂 Resolver。**
-
----
-
-# 14. 后续 Resolver 的演进
-
-第一版：
-
-```text
-target name
-    ↓
-repository.find_by_name()
-```
-
-后面可以逐步增加：
-
-```text
-1. Exact qualified name
-2. Same module
-3. Same class
-4. Import
-5. Package
-6. Type information
-7. Language-specific rule
-8. Heuristic
-```
-
-最终：
-
-```text
-Resolver
-   │
-   ├── ExactMatch
-   ├── SameModule
-   ├── Import
-   ├── TypeBased
-   └── Fallback
-```
-
-但第一版不要实现这些。
-
----
-
-# 15. ResolvedReference
-
-Resolver 成功之后产生：
-
-```python
-@dataclass(frozen=True)
-class ResolvedReference:
-    source: SymbolId
-    target: SymbolId
-    kind: ReferenceKind
-    location: SourceLocation | None = None
-```
-
-例如：
-
-```text
-Reference:
-
-bSave_Click
-    ↓
-"Validate"
-```
-
-变成：
-
-```text
-ResolvedReference:
-
-bSave_Click
-    ↓
-frmModiRec.Validate
-```
-
----
-
-# 16. DependencyBuilder
-
-把：
-
-```text
-Parser
-+
-Resolver
-```
-
-组合起来。
-
-```python
-class DependencyBuilder:
-
-    def __init__(
-        self,
-        parser: Parser,
-        resolver: Resolver,
-        repository: SymbolRepository,
-    ):
-        self.parser = parser
-        self.resolver = resolver
-        self.repository = repository
-
-    def build(
-        self,
-        symbol: Symbol,
-        source: str,
-    ) -> list[ResolvedReference]:
-
-        references = self.parser.parse(
-            symbol,
-            source,
-        )
-
-        result = []
-
-        for reference in references:
-
-            resolved = self.resolver.resolve(
-                reference,
-                self.repository,
-            )
-
-            if resolved.status != ResolveStatus.RESOLVED:
-                continue
-
-            result.append(
-                ResolvedReference(
-                    source=reference.source,
-                    target=resolved.target,
-                    kind=reference.kind,
-                    location=reference.location,
-                )
-            )
-
-        return result
-```
-
-这里有一个重要原则：
-
-> **Unresolved Reference 不应该进入 DependencyGraph。**
-
-否则 Graph 会产生错误关系。
-
----
-
-# 17. DependencyGraph
-
-Graph 只负责保存：
-
-```text
-Symbol → Symbol
-```
-
-第一版使用：
-
-```python
-class DependencyGraph:
-
-    def __init__(self):
-        self._outgoing: dict[
-            SymbolId,
-            set[SymbolId],
-        ] = {}
-
-        self._incoming: dict[
-            SymbolId,
-            set[SymbolId],
-        ] = {}
-```
-
-为什么需要两个方向？
-
-因为你有两个核心需求：
-
-```text
-Forward:
-A → B → C
-```
-
-以及：
-
-```text
-Impact:
-C ← B ← A
-```
-
-所以同时维护：
-
-```text
-outgoing
-incoming
-```
-
-可以让两种查询都很快。
-
----
-
-# 18. Graph Mutation API
-
-```python
-def add(
-    self,
-    reference: ResolvedReference,
-) -> None:
-    ...
-```
-
-实现：
-
-```python
-def add(
-    self,
-    reference: ResolvedReference,
-) -> None:
-
-    source = reference.source
-    target = reference.target
-
-    self._outgoing.setdefault(
-        source,
-        set(),
-    ).add(target)
-
-    self._incoming.setdefault(
-        target,
-        set(),
-    ).add(source)
-```
-
----
-
-# 19. Remove
-
-```python
-def remove(
-    self,
-    reference: ResolvedReference,
-) -> None:
-
-    source = reference.source
-    target = reference.target
-
-    self._outgoing.get(
-        source,
-        set(),
-    ).discard(target)
-
-    self._incoming.get(
-        target,
-        set(),
-    ).discard(source)
-```
-
----
-
-# 20. 最重要的 API：replace_outgoing
-
-这是为了支持你的增量分析。
-
-```python
-def replace_outgoing(
-    self,
-    source: SymbolId,
-    references: list[ResolvedReference],
-) -> None:
-    ...
-```
-
-逻辑：
-
-```text
-删除 source 原来的所有 outgoing edges
-                 ↓
-添加新的 outgoing edges
-```
-
-例如：
-
-```text
-原来：
-
-A → B
-A → C
-```
-
-重新解析 A 后：
-
-```text
-A → B
-A → D
-```
-
-执行：
-
-```python
-graph.replace_outgoing(
-    A,
-    [
-        A → B,
-        A → D,
+from codegraph import Codebase, SourceFile, VbaFrontend
+
+codebase = Codebase.analyze(
+    files=[
+        SourceFile("frmOrder.bas", form_source),
+        SourceFile("modOrder.bas", module_source),
     ],
+    frontends=[VbaFrontend()],
 )
 ```
 
-结果：
+`Codebase` 会完成其余工作：把文件交给合适的前端、收集函数、建立调用关系，并保存可查询结果。
 
-```text
-A → B
-A → D
-```
+调用者不需要切分函数，不需要手动构建图，也不需要理解编译器、AST 或 LSP。
 
-而不是留下：
+## 核心概念
 
-```text
-A → C
-```
+只需要认识四个概念。
 
----
+| 名称 | 可以把它理解为 | 例子 |
+| --- | --- | --- |
+| `SourceFile` | 一份完整的代码文件 | `modOrder.bas` |
+| `Function` | 文件中一段可调用的代码 | `SubmitOrder()` |
+| `Call` | “这个函数调用了另一个函数” | `SaveOrder -> SubmitOrder` |
+| `Codebase` | 已分析完成、可以查询的代码库 | 当前项目的所有文件 |
 
-# 21. Graph Query API
-
-核心查询：
+### SourceFile
 
 ```python
-def dependencies_of(
-    self,
-    symbol: SymbolId,
-) -> set[SymbolId]:
-    ...
-```
-
-表示：
-
-> 谁是这个 Symbol 的直接依赖？
-
-例如：
-
-```text
-A → B
-B → C
-```
-
-：
-
-```python
-dependencies_of(A)
-```
-
-返回：
-
-```text
-{B}
-```
-
----
-
-反方向：
-
-```python
-def dependents_of(
-    self,
-    symbol: SymbolId,
-) -> set[SymbolId]:
-    ...
-```
-
-表示：
-
-> 谁直接依赖这个 Symbol？
-
-例如：
-
-```text
-dependents_of(C)
-```
-
-返回：
-
-```text
-{B}
-```
-
----
-
-# 22. Recursive Query
-
-提供：
-
-```python
-descendants_of()
-```
-
-和：
-
-```python
-ancestors_of()
-```
-
-例如：
-
-```text
-A → B → C
-```
-
-：
-
-```python
-descendants_of(A)
-```
-
-得到：
-
-```text
-B
-C
-```
-
-而：
-
-```python
-ancestors_of(C)
-```
-
-得到：
-
-```text
-B
-A
-```
-
----
-
-# 23. DFS 实现
-
-第一版直接使用 DFS。
-
-```python
-def descendants_of(
-    self,
-    symbol: SymbolId,
-) -> set[SymbolId]:
-
-    visited: set[SymbolId] = set()
-    stack = [symbol]
-
-    while stack:
-
-        current = stack.pop()
-
-        for dependency in self.dependencies_of(
-            current
-        ):
-            if dependency in visited:
-                continue
-
-            visited.add(dependency)
-            stack.append(dependency)
-
-    return visited
-```
-
-反向完全一样：
-
-```python
-def ancestors_of(
-    self,
-    symbol: SymbolId,
-) -> set[SymbolId]:
-
-    visited: set[SymbolId] = set()
-    stack = [symbol]
-
-    while stack:
-
-        current = stack.pop()
-
-        for dependent in self.dependents_of(
-            current
-        ):
-            if dependent in visited:
-                continue
-
-            visited.add(dependent)
-            stack.append(dependent)
-
-    return visited
-```
-
----
-
-# 24. 为什么 visited 必须存在？
-
-真实项目可能存在：
-
-```text
-A → B
-B → C
-C → A
-```
-
-也就是循环依赖。
-
-没有：
-
-```python
-visited
-```
-
-DFS 会无限循环。
-
-所以 Graph traversal 第一版就应该正确处理 cycle。
-
----
-
-# 25. DependencyPath
-
-Graph 不保存 Path。
-
-但分析的时候可以生成 Path。
-
-例如：
-
-```text
-A
- ↓
-B
- ↓
-C
-```
-
-可以得到：
-
-```python
-@dataclass
-class DependencyPath:
-    nodes: list[SymbolId]
-```
-
-例如：
-
-```python
-DependencyPath(
-    nodes=[A, B, C]
+SourceFile(
+    path="modOrder.bas",
+    content=source_text,
+    language="vba",  # 可选
 )
 ```
 
-这个对象属于：
+`path` 是文件的唯一名称，用于刷新时替换或删除文件。`content` 必须是完整文件内容。
+
+### Function
+
+前端从文件中找到函数，并保存：
+
+* 稳定的函数 ID；
+* 函数名称；
+* 所在文件和模块；
+* 这段函数的原始代码；
+* 函数在文件中的行号范围。
+
+函数 ID 在同一个代码库中必须唯一，并且函数只是移动到别的行时不能改变。例如：
 
 ```text
-Query / Analysis
+vba:frmOrder:bSave_Click
+vba:modOrder:SubmitOrder
+java:OrderController#create(OrderRequest)
 ```
 
-而不是 Graph 的存储模型。
+### Call
 
----
-
-# 26. Entry Point
-
-入口是另外一个概念。
-
-例如：
+`Call` 表示在一个函数中发现了一次调用：
 
 ```text
-Access:
-
-frmModiRec.bSave_Click
+bSave_Click -> SubmitOrder
 ```
 
-或者：
+前端能确定目标时，`Call` 会包含目标函数 ID，`Codebase` 因此建立可靠的调用关系。
 
-```text
-Java:
+前端无法确定目标时，仍应保留调用名称和位置，并输出诊断信息；不应猜测目标或建立可能错误的关系。
 
-CustomerController.create
+### Codebase
+
+`Codebase` 是唯一的核心对象。它保存函数和调用关系，并提供查询、入口管理和刷新。
+
+```python
+save = "vba:frmOrder:bSave_Click"
+submit = "vba:modOrder:SubmitOrder"
+
+codebase.function(save)
+codebase.callees(save)
+codebase.callers(submit)
 ```
 
-统一成：
+## 语言前端
+
+不同语言的语法不同，所以每种语言由自己的 Frontend 负责理解。
+
+```python
+class LanguageFrontend(Protocol):
+    def supports(self, file: SourceFile) -> bool:
+        """这个前端是否能处理该文件？"""
+
+    def analyze(self, files: Sequence[SourceFile]) -> FileAnalysis:
+        """从完整文件中找出函数、调用和诊断。"""
+```
+
+前端可以是简单的文本解析器，也可以在内部使用成熟的 LSP、编译器或静态分析工具。调用者不需要知道它采用哪一种方式。
+
+每个文件必须由**恰好一个**前端处理：
+
+* 没有前端支持该文件：产生错误诊断；
+* 两个前端都支持该文件：产生错误诊断；
+* 前端处理多个同语言文件时：可以一次分析整批文件，因此可以识别跨文件调用。
+
+### 前端要做什么
+
+一个 Frontend 的输出是 `FileAnalysis`：
 
 ```python
 @dataclass(frozen=True)
-class EntryPoint:
-    symbol: SymbolId
-    kind: str
+class FileAnalysis:
+    functions: tuple[Function, ...]
+    calls: tuple[Call, ...]
+    entry_candidates: tuple[EntryCandidate, ...]
+    diagnostics: tuple[Diagnostic, ...]
 ```
 
-例如：
+前端负责：
 
-```python
-EntryPoint(
-    symbol=SymbolId(
-        "vba:frmModiRec:bSave_Click"
-    ),
-    kind="form_event",
-)
+1. 从完整文件中找出函数的开始和结束；
+2. 为函数生成稳定 ID；
+3. 保存函数源码和行号范围；
+4. 找出函数中的调用；
+5. 在能够可靠判断时，将调用连接到目标函数；
+6. 找出可能的入口，例如表单按钮事件或 HTTP 路由；
+7. 报告无法正确理解的语法或代码。
+
+核心不负责理解语言。例如，VBA 不区分大小写、Java 有方法重载、PL/SQL 有 Package；这些规则都应在相应 Frontend 中实现。
+
+## 建立调用关系
+
+`Codebase.analyze()` 按以下顺序工作：
+
+```text
+完整文件
+  -> Frontend 找出函数和调用
+  -> Codebase 收集所有函数
+  -> Codebase 保存已确定的调用
+  -> 可以查询代码库
 ```
 
-Java：
+所有函数先被收集，再保存调用关系。因此，一个文件可以调用另一个文件中的函数，也可以调用稍后声明的函数。
+
+CodeGraph 只保存**直接调用**：
+
+```text
+SaveOrder -> ValidateOrder
+ValidateOrder -> LoadCustomer
+```
+
+它不会额外保存 `SaveOrder -> LoadCustomer`。当需要全部依赖时，查询会沿着直接调用关系继续查找。
+
+这让数据更少，也避免保存互相矛盾的重复关系。
+
+## 查询代码
+
+### 查询调用关系
 
 ```python
-EntryPoint(
-    symbol=SymbolId(
-        "java:CustomerController:create"
-    ),
+codebase.callees(function_id)
+codebase.callers(function_id)
+```
+
+默认只返回直接关系。传入 `transitive=True` 时，返回所有间接关系：
+
+```python
+codebase.callees("vba:frmOrder:bSave_Click", transitive=True)
+```
+
+即使代码中有循环调用，查询也必须安全结束，并且函数不会被算作自己的调用者或被调用者。
+
+### 从入口收集上下文
+
+入口是业务开始执行的位置，例如：
+
+* 表单按钮事件；
+* HTTP 请求处理函数；
+* 定时任务；
+* 消息消费者；
+* 调用者手工指定的过程。
+
+前端只能提供“候选入口”，最终是否作为入口由调用者确认：
+
+```python
+# 接受前端发现的候选，例如 VBA 的按钮事件。
+codebase.accept_entry_candidates()
+
+# 按业务规则增加入口。
+codebase.mark_entries(
+    lambda function: function.attributes.get("is_controller", False),
     kind="controller",
 )
-```
 
----
-
-# 27. Entry Point Analysis
-
-第一版只需要：
-
-```python
-def analyze_entry_point(
-    graph: DependencyGraph,
-    entry_point: SymbolId,
-) -> set[SymbolId]:
-
-    return {
-        entry_point,
-        *graph.descendants_of(entry_point),
-    }
-```
-
-例如：
-
-```text
-bSave_Click
-    ↓
-Validate
-    ↓
-isDuplicated
-    ↓
-PKG_MODI.get_fin_data
-```
-
-返回：
-
-```text
-bSave_Click
-Validate
-isDuplicated
-PKG_MODI.get_fin_data
-```
-
-然后从 Repository 获取对应 source code。
-
----
-
-# 28. Analysis Context
-
-不要直接把 Graph 给 LLM。
-
-建立一个简单的 Context：
-
-```python
-@dataclass
-class AnalysisContext:
-    entry_point: SymbolId
-    symbols: list[Symbol]
-    paths: list[DependencyPath]
-```
-
-以后可以加入：
-
-```text
-source code
-metadata
-relationship
-analysis history
-```
-
-但第一版先简单。
-
----
-
-# 29. Change Impact
-
-这是第二个核心用例。
-
-如果：
-
-```text
-A → B → C
-```
-
-C 修改：
-
-```python
-graph.ancestors_of(C)
-```
-
-得到：
-
-```text
-B
-A
-```
-
-然后筛选 EntryPoint：
-
-```text
-A = EntryPoint
-B = Function
-```
-
-所以：
-
-```text
-Affected EntryPoint:
-
-A
-```
-
-然后重新生成：
-
-```text
-A → B → C
-```
-
-对应的 AnalysisContext。
-
----
-
-# 30. 完整增量流程
-
-假设：
-
-```text
-PKG_MODI.update_modi_status
-```
-
-发生变化。
-
-流程：
-
-```text
-ChangeSet
-    ↓
-Changed Symbol
-    ↓
-Parser
-    ↓
-Reference
-    ↓
-Resolver
-    ↓
-Resolved Reference
-    ↓
-Graph.replace_outgoing()
-    ↓
-Graph.ancestors_of(changed_symbol)
-    ↓
-Affected EntryPoints
-    ↓
-Rebuild AnalysisContext
-    ↓
-LLM
-```
-
-这就是你最终想实现的核心机制。
-
----
-
-# 31. 推荐的 Project Facade
-
-上面这些底层对象不应该直接暴露给普通调用者。
-
-对外提供一个：
-
-```python
-CodeProject
-```
-
-例如：
-
-```python
-class CodeProject:
-
-    def dependencies_of(
-        self,
-        symbol: SymbolId,
-    ) -> set[SymbolId]:
-        ...
-
-    def dependents_of(
-        self,
-        symbol: SymbolId,
-    ) -> set[SymbolId]:
-        ...
-
-    def descendants_of(
-        self,
-        symbol: SymbolId,
-    ) -> set[SymbolId]:
-        ...
-
-    def ancestors_of(
-        self,
-        symbol: SymbolId,
-    ) -> set[SymbolId]:
-        ...
-
-    def analyze_entry_point(
-        self,
-        entry_point: SymbolId,
-    ) -> AnalysisContext:
-        ...
-
-    def analyze_impact(
-        self,
-        changed: SymbolId,
-    ) -> list[EntryPoint]:
-        ...
-```
-
-这样外部模块只需要理解：
-
-```text
-CodeProject
-```
-
-而不需要知道：
-
-```text
-Parser
-Resolver
-Graph
-Repository
-```
-
----
-
-# 32. 第一版目录结构
-
-建议保持非常简单：
-
-```text
-src/
-└── codegraph/
-    │
-    ├── domain/
-    │   ├── symbol.py
-    │   ├── reference.py
-    │   └── entrypoint.py
-    │
-    ├── parser/
-    │   ├── base.py
-    │   ├── vba.py
-    │   └── java.py
-    │
-    ├── resolver/
-    │   ├── base.py
-    │   └── simple.py
-    │
-    ├── graph/
-    │   └── dependency.py
-    │
-    ├── repository/
-    │   └── symbol.py
-    │
-    ├── analysis/
-    │   ├── dependency.py
-    │   └── impact.py
-    │
-    └── project.py
-```
-
-第一版**不要**：
-
-```text
-factory/
-strategy/
-manager/
-service/
-handler/
-provider/
-```
-
-到真正有复杂性的时候再抽象。
-
----
-
-# 33. 最小可工作的实现
-
-实际上核心代码可以非常少。
-
-```python
-parser = VbaParser()
-
-repository = InMemorySymbolRepository()
-
-resolver = SimpleResolver()
-
-builder = DependencyBuilder(
-    parser=parser,
-    resolver=resolver,
-    repository=repository,
-)
-
-graph = DependencyGraph()
-```
-
-处理一个 Function：
-
-```python
-resolved = builder.build(
-    symbol,
-    source,
-)
-
-graph.replace_outgoing(
-    symbol.id,
-    resolved,
+# 完全替换当前入口。
+codebase.set_entries(
+    ["vba:frmOrder:bSave_Click"],
+    kind="manual",
 )
 ```
 
-查询：
+从入口获取上下文：
 
 ```python
-graph.dependencies_of(symbol.id)
+context = codebase.context_for("vba:frmOrder:bSave_Click")
 ```
 
-递归：
+上下文包含：
+
+| 内容 | 用途 |
+| --- | --- |
+| 入口函数 | 本次分析从哪里开始 |
+| 所有可达函数 | 入口执行所需的代码及其源码 |
+| 内部调用 | 这些函数之间的已确定关系 |
+| 调用路径 | 从入口到最深依赖的路径 |
+| 诊断信息 | 未识别调用或解析问题 |
+
+CodeGraph 不调用 LLM，也不生成 prompt。上层程序可以按自己的 token 预算和提示词规则使用 `context` 中的函数源码。
+
+## 文件刷新和影响分析
+
+文件变更后，用新内容刷新：
 
 ```python
-graph.descendants_of(symbol.id)
+result = codebase.refresh([
+    SourceFile("modOrder.bas", changed_source),
+])
 ```
 
-反向：
+删除文件时：
 
 ```python
-graph.ancestors_of(symbol.id)
-```
-
-这就是第一版核心。
-
----
-
-# 34. 一个完整 VBA 示例
-
-源码：
-
-```vb
-Private Sub bSave_Click()
-
-    If Validate() Then
-        Call update_modi_status()
-    End If
-
-End Sub
-```
-
-Parser：
-
-```text
-Reference(
-    source=bSave_Click,
-    target_name="Validate"
-)
-
-Reference(
-    source=bSave_Click,
-    target_name="update_modi_status"
+result = codebase.refresh(
+    changed_files=[],
+    removed_paths=["legacy/modOldOrder.bas"],
 )
 ```
 
-Resolver：
+结果会包含：
 
-```text
-Validate
-    ↓
-frmModiRec.Validate
+* 修改、新增或删除的函数；
+* 调用关系发生变化的函数；
+* 受影响的已确认入口；
+* 刷新后发现的诊断。
 
-update_modi_status
-    ↓
-PKG_MODI.update_modi_status
-```
+第一版每次刷新重新分析所有当前文件。这样虽然不是最快，但最容易保证正确：跨文件调用、类型信息或 LSP 结果不会因为局部更新而过期。
 
-Resolved Reference：
+影响分析同时查看修改前和修改后的调用关系。例如删除 `ValidateOrder` 后，新代码已经没有对它的调用；但仍需要知道原来调用它的 `SaveOrder` 入口应重新分析。
 
-```text
-bSave_Click
-    → frmModiRec.Validate
+## 诊断
 
-bSave_Click
-    → PKG_MODI.update_modi_status
-```
+诊断是分析结果的一部分，不是仅供开发者查看的日志。
 
-Graph：
+常见诊断包括：
 
-```text
-frmModiRec.bSave_Click
-       ├── frmModiRec.Validate
-       │
-       └── PKG_MODI.update_modi_status
-```
+* 文件没有合适的 Frontend；
+* 文件被多个 Frontend 同时处理；
+* 两个函数使用同一个 ID；
+* 调用来自不存在的函数；
+* 调用目标不在当前代码库中；
+* Frontend 无法理解部分源码；
+* 调用名称存在，但无法可靠确定目标。
 
-如果：
+遇到不能确定的调用时，CodeGraph 选择“没有关系，并说明原因”，而不是“猜一个可能的关系”。这是为了避免错误影响分析和错误上下文。
 
-```text
-frmModiRec.Validate
-       ↓
-isDuplicated
-```
+## 维护边界
 
-那么：
+维护时只需遵守以下分工：
 
-```text
-descendants_of(bSave_Click)
-```
+| 组件 | 只负责什么 |
+| --- | --- |
+| Frontend | 读懂特定语言，输出函数和调用 |
+| Codebase | 保存函数与调用，提供查询、入口和刷新 |
+| 上层应用 | 展示结果、调用 LLM、生成文档、执行 CI |
 
-得到：
+`Codebase` 内部可以用字典保存函数，并用正向、反向索引保存调用关系。它们是实现细节，不需要成为调用者或插件作者要操作的对象。
 
-```text
-Validate
-isDuplicated
-PKG_MODI.update_modi_status
-```
+如果未来需要更多语言，应新增 Frontend；如果未来需要更快的刷新，应优化 `Codebase` 的内部重建策略。两者都不应增加调用者需要理解的概念。
 
----
+## 验收标准
 
-# 35. Java 同样工作
+实现满足以下条件才符合本规格：
 
-源码：
-
-```java
-public void create() {
-    service.create();
-}
-```
-
-Parser：
-
-```text
-Reference(
-    source=CustomerController.create,
-    target_name="service.create",
-    kind=CALL
-)
-```
-
-Resolver：
-
-```text
-service.create
-       ↓
-CustomerService.create
-```
-
-Graph：
-
-```text
-CustomerController.create
-        ↓
-CustomerService.create
-```
-
-核心代码完全不用修改。
-
-只需要：
-
-```text
-JavaParser
-JavaResolver
-```
-
----
-
-# 36. 第一版暂时明确不做什么
-
-这是非常重要的。
-
-第一版**不做**：
-
-### 不做 Graph Database
-
-不用 Neo4j。
-
-### 不做 AST Universal Framework
-
-不同语言先各自 Parser。
-
-### 不做复杂 Type System
-
-Resolver 先使用简单规则。
-
-### 不做 LLM Resolver
-
-依赖关系优先保证 deterministic。
-
-### 不做 Dependency Cache
-
-DFS/BFS 先解决性能问题。
-
-### 不保存 Transitive Dependency
-
-只保存：
-
-```text
-A → B
-B → C
-```
-
-### 不把 Analysis Result 放进 Graph
-
-Graph 只保存代码依赖。
-
----
-
-# 37. 第一版的测试重点
-
-核心测试应该非常容易写。
-
-## Parser
-
-```text
-source
-  ↓
-references
-```
-
-测试：
-
-```text
-Call Validate()
-→ Validate
-
-Call update_modi_status()
-→ update_modi_status
-```
-
----
-
-## Resolver
-
-```text
-Reference
-  ↓
-ResolveResult
-```
-
-测试：
-
-```text
-唯一匹配
-→ RESOLVED
-
-不存在
-→ UNRESOLVED
-
-多个匹配
-→ AMBIGUOUS
-```
-
----
-
-## Graph
-
-测试：
-
-```text
-A → B
-B → C
-```
-
-应该：
-
-```text
-dependencies_of(A)
-→ B
-
-descendants_of(A)
-→ B,C
-
-dependents_of(C)
-→ B
-
-ancestors_of(C)
-→ B,A
-```
-
----
-
-## Cycle
-
-测试：
-
-```text
-A → B
-B → C
-C → A
-```
-
-确保：
-
-```python
-graph.descendants_of(A)
-```
-
-不会死循环。
-
----
-
-# 38. 第一版完成后的能力
-
-完成这套核心以后，你实际上已经拥有一个非常有价值的基础设施：
-
-```text
-                    CodeGraph
-                        │
-        ┌───────────────┼────────────────┐
-        │               │                │
-        ▼               ▼                ▼
-   Dependency       Entry Point       Change
-     Query            Query            Impact
-        │               │                │
-        ▼               ▼                ▼
-   dependencies     descendants      ancestors
-   dependents
-```
-
-然后 LLM 只是其中一个 consumer：
-
-```text
-                    CodeGraph
-                        │
-                        ▼
-                AnalysisContext
-                        │
-             ┌──────────┼──────────┐
-             ▼          ▼          ▼
-            LLM       Reporter    RAG
-```
-
-这点非常重要。
-
-**不要把这个框架设计成“LLM Dependency Analyzer”。**
-
-它本质上应该是：
-
-> **Code Dependency Graph Library**
-
-LLM 只是使用这个 Library 的一个上层模块。
-
----
-
-# 39. 最终推荐的依赖方向
-
-整个 package 最终应该保持：
-
-```text
-domain
-  ↑
-parser
-  ↑
-resolver
-  ↑
-graph
-  ↑
-analysis
-  ↑
-project
-  ↑
-cli / llm / reporter
-```
-
-更准确地说，依赖应该是：
-
-```text
-                 domain
-                /      \
-               /        \
-          parser       graph
-             │           │
-             ▼           ▼
-          resolver    analysis
-               \         /
-                \       /
-                 project
-                    │
-          ┌─────────┼─────────┐
-          ▼         ▼         ▼
-         CLI       LLM     Reporter
-```
-
-其中：
-
-> **domain 是最稳定的部分；语言差异集中在 Parser / Resolver；Graph 保持完全语言无关。**
-
----
-
-## 第一版的核心边界
-
-最后可以把整个设计压缩成下面 5 个问题：
-
-```text
-Parser
-  └─ “源码里引用了谁？”
-
-Reference
-  └─ “这个引用是什么？”
-
-Resolver
-  └─ “这个名字实际指向哪个 Symbol？”
-
-ResolvedReference
-  └─ “已经确认 A → B。”
-
-DependencyGraph
-  └─ “保存并查询所有 A → B。”
-```
-
-然后只围绕两个业务操作：
-
-```python
-graph.descendants_of(entry_point)
-```
-
-> **从入口向下，获取 LLM 需要分析的整个依赖范围。**
-
-以及：
-
-```python
-graph.ancestors_of(changed_function)
-```
-
-> **从变化函数向上，找到需要重新分析的调用链。**
-
-这已经足够支撑你当前的 **Access VBA + Java + Function Chunk + LLM 增量文档分析** 场景。后续真正出现复杂性时，再逐步增强 Resolver、Path、Scope、External Dependency、Persistence 和缓存，而不需要推翻这个核心模型。
+1. 调用者只需提供完整文件和语言 Frontend；
+2. Frontend 能找出函数、源码范围、调用和诊断；
+3. 每个文件只由一个 Frontend 分析；
+4. 函数 ID 稳定且唯一；
+5. 跨文件和前向调用不依赖文件顺序；
+6. 只有已确定的内部调用进入调用关系；
+7. 查询能处理循环调用；
+8. 调用者能管理入口并获得入口上下文；
+9. 刷新后不会保留已删除函数或过期调用；
+10. 删除调用或函数仍能找到此前受影响的入口。
