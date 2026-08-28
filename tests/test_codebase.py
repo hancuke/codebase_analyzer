@@ -1,10 +1,15 @@
 import pytest
 
 from codegraph import (
+    BaseFrontend,
     Codebase,
+    Diagnostic,
     FileAnalysis,
+    Function,
     FunctionNotFoundError,
+    RawCall,
     SourceFile,
+    SourceRange,
     VbaFrontend,
 )
 
@@ -149,3 +154,79 @@ def test_files_require_exactly_one_frontend() -> None:
     )
 
     assert [item.code for item in codebase.diagnostics] == ["ambiguous_frontend"]
+
+
+def test_base_frontend_pipeline_template() -> None:
+    class DummyPyFrontend(BaseFrontend):
+        language_name = "python"
+        file_extensions = {".py"}
+
+        def extract_functions(
+            self, source_file: SourceFile
+        ) -> tuple[list[Function], list[Diagnostic]]:
+            f1 = Function(
+                id="python:main:run",
+                name="run",
+                language="python",
+                module="main",
+                file=source_file.path,
+                source="def run(): helper()",
+                source_range=SourceRange(1, 1),
+            )
+            f2 = Function(
+                id="python:main:helper",
+                name="helper",
+                language="python",
+                module="main",
+                file=source_file.path,
+                source="def helper(): pass",
+                source_range=SourceRange(2, 2),
+            )
+            return [f1, f2], []
+
+        def extract_raw_calls(self, function: Function) -> list[RawCall]:
+            if function.name == "run":
+                return [RawCall(name="helper", line=1)]
+            return []
+
+    codebase = Codebase.analyze(
+        [SourceFile("main.py", "def run(): helper()\ndef helper(): pass")],
+        [DummyPyFrontend()],
+    )
+
+    assert [item.id for item in codebase.callees("python:main:run")] == [
+        "python:main:helper"
+    ]
+
+
+def test_vba_token_call_extraction_ignores_comments_and_strings() -> None:
+    codebase = Codebase.analyze(
+        [
+            SourceFile(
+                "modCalls.bas",
+                """
+Public Sub Main()
+    Call SaveOrder
+    SaveOrder order
+    result = ValidateOrder()
+    ' Call IgnoredComment
+    message = "Call IgnoredString"
+End Sub
+
+Public Sub SaveOrder()
+End Sub
+
+Public Function ValidateOrder() As Boolean
+End Function
+""".lstrip(),
+            )
+        ],
+        [VbaFrontend()],
+    )
+
+    calls = codebase.calls_from("vba:modCalls:Main")
+    assert [(call.name, call.line) for call in calls] == [
+        ("SaveOrder", 2),
+        ("SaveOrder", 3),
+        ("ValidateOrder", 4),
+    ]

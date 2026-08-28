@@ -3,3 +3,4 @@ Name: codegraph
 Version: 0.1.0
 Summary: A small, language-independent code dependency graph library
 Requires-Python: >=3.10
+Requires-Dist: pygments>=2.21.0

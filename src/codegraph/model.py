@@ -42,7 +42,6 @@ class Call:
     source_id: str
     name: str
     line: int
-    column: int
     target_id: str | None = None
     evidence: str | None = None
 
@@ -94,4 +93,3 @@ class RefreshResult:
     changed_call_source_ids: tuple[str, ...]
     affected_entry_points: tuple[EntryPoint, ...]
     diagnostics: tuple[Diagnostic, ...]
-

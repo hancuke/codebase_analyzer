@@ -1,5 +1,5 @@
 from .core import Codebase, FunctionNotFoundError
-from .frontend import LanguageFrontend
+from .frontend import BaseFrontend, LanguageFrontend, RawCall
 from .model import (
     AnalysisContext,
     Call,
@@ -13,9 +13,11 @@ from .model import (
     SourceRange,
 )
 from .vba import VbaFrontend
+from .oracle import OraclePlsqlFrontend
 
 __all__ = [
     "AnalysisContext",
+    "BaseFrontend",
     "Call",
     "Codebase",
     "Diagnostic",
@@ -25,8 +27,10 @@ __all__ = [
     "Function",
     "FunctionNotFoundError",
     "LanguageFrontend",
+    "RawCall",
     "RefreshResult",
     "SourceFile",
     "SourceRange",
     "VbaFrontend",
+    "OraclePlsqlFrontend",
 ]

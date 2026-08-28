@@ -159,7 +159,6 @@ class Codebase:
                     key=lambda call: (
                         call.source_id,
                         call.line,
-                        call.column,
                         call.name.casefold(),
                         call.target_id or "",
                     ),

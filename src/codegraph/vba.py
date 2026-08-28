@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import re
 from pathlib import PurePath
-from typing import Sequence
 
+from pygments.lexers import get_lexer_by_name
+from pygments.token import Comment, Name, String, Text
+
+from .frontend import BaseFrontend, RawCall
 from .model import (
-    Call,
     Diagnostic,
     EntryCandidate,
-    FileAnalysis,
     Function,
     SourceFile,
     SourceRange,
@@ -21,11 +22,6 @@ _PROCEDURE_START = re.compile(
     re.IGNORECASE,
 )
 _PROCEDURE_END = re.compile(r"^\s*End\s+(?:Sub|Function)\b", re.IGNORECASE)
-_EXPLICIT_CALL = re.compile(
-    r"\bCall\s+([A-Za-z_]\w*)(?!\s*\.)", re.IGNORECASE
-)
-_PAREN_CALL = re.compile(r"(?<![\w.])([A-Za-z_]\w*)\s*\(", re.IGNORECASE)
-_BARE_CALL = re.compile(r"^\s*(?:Call\s+)?([A-Za-z_]\w*)\b", re.IGNORECASE)
 _CONTROL_WORDS = {
     "call",
     "debug",
@@ -48,79 +44,14 @@ _CONTROL_WORDS = {
 }
 
 
-class VbaFrontend:
-    """A deliberately small VBA frontend for Sub and Function procedures."""
+class VbaFrontend(BaseFrontend):
+    """A VBA frontend built on the standard BaseFrontend pipeline."""
 
-    def supports(self, file: SourceFile) -> bool:
-        return file.language == "vba" or (
-            file.language is None
-            and PurePath(file.path).suffix.casefold() in {".bas", ".cls", ".frm"}
-        )
+    language_name = "vba"
+    file_extensions = {".bas", ".cls", ".frm"}
+    is_case_sensitive = False
 
-    def analyze(self, files: Sequence[SourceFile]) -> FileAnalysis:
-        functions: list[Function] = []
-        diagnostics: list[Diagnostic] = []
-        for source_file in files:
-            found, file_diagnostics = self._functions_in(source_file)
-            functions.extend(found)
-            diagnostics.extend(file_diagnostics)
-
-        by_name: dict[str, list[Function]] = {}
-        for function in functions:
-            by_name.setdefault(function.name.casefold(), []).append(function)
-
-        calls: list[Call] = []
-        candidates: list[EntryCandidate] = []
-        for function in functions:
-            if function.name.casefold().endswith("_click"):
-                candidates.append(
-                    EntryCandidate(function_id=function.id, kind="form_event")
-                )
-            for name, line, column in self._calls_in(function):
-                targets = by_name.get(name.casefold(), [])
-                if len(targets) == 1:
-                    calls.append(
-                        Call(
-                            source_id=function.id,
-                            name=name,
-                            line=line,
-                            column=column,
-                            target_id=targets[0].id,
-                            evidence="vba_name_resolution",
-                        )
-                    )
-                else:
-                    reason = (
-                        "no indexed VBA procedure has that name"
-                        if not targets
-                        else "more than one indexed VBA procedure has that name"
-                    )
-                    diagnostics.append(
-                        Diagnostic(
-                            code="unresolved_call",
-                            severity="warning",
-                            message=f"Cannot resolve VBA call {name!r}: {reason}.",
-                            path=function.file,
-                            function_id=function.id,
-                            line=line,
-                        )
-                    )
-                    calls.append(
-                        Call(
-                            source_id=function.id,
-                            name=name,
-                            line=line,
-                            column=column,
-                        )
-                    )
-        return FileAnalysis(
-            functions=tuple(functions),
-            calls=tuple(calls),
-            entry_candidates=tuple(candidates),
-            diagnostics=tuple(diagnostics),
-        )
-
-    def _functions_in(
+    def extract_functions(
         self, source_file: SourceFile
     ) -> tuple[list[Function], list[Diagnostic]]:
         lines = source_file.content.splitlines(keepends=True)
@@ -155,6 +86,73 @@ class VbaFrontend:
             )
         return functions, diagnostics
 
+    def extract_raw_calls(self, function: Function) -> list[RawCall]:
+        """Extract likely VBA calls from Pygments tokens.
+
+        Pygments handles comments and strings as separate token types. This
+        method only applies lightweight call-position rules; name resolution
+        remains the responsibility of BaseFrontend.
+        """
+        calls: list[RawCall] = []
+        lexer = get_lexer_by_name("vb.net")
+        token_stream = [
+            (token_type, value, function.source[:position].count("\n"))
+            for position, token_type, value in lexer.get_tokens_unprocessed(
+                function.source
+            )
+        ]
+        significant = [
+            item
+            for item in token_stream
+            if not item[0] in Text.Whitespace
+            and not item[0] in Comment
+            and not item[0] in String
+        ]
+        seen: set[tuple[str, int]] = set()
+
+        for index, (token_type, value, offset) in enumerate(significant):
+            if token_type not in Name or not re.fullmatch(r"[A-Za-z_]\w*", value):
+                continue
+
+            line = function.source_range.start_line + offset
+            if line == function.source_range.start_line:
+                continue
+
+            normalized = value.casefold()
+            if normalized in _CONTROL_WORDS:
+                continue
+
+            previous = significant[index - 1] if index else None
+            next_token = (
+                significant[index + 1] if index + 1 < len(significant) else None
+            )
+            previous_same_line = previous is not None and previous[2] == offset
+            next_value = next_token[1] if next_token is not None else ""
+            previous_value = previous[1] if previous_same_line else ""
+
+            if next_value == "=" or previous_value == ".":
+                continue
+
+            is_call = (
+                next_value == "("
+                or previous_value.casefold() == "call"
+                or not previous_same_line
+            )
+            if not is_call:
+                continue
+
+            key = (normalized, line)
+            if key in seen:
+                continue
+            seen.add(key)
+            calls.append(RawCall(name=value, line=line))
+        return calls
+
+    def detect_entry_candidate(self, function: Function) -> EntryCandidate | None:
+        if function.name.casefold().endswith("_click"):
+            return EntryCandidate(function_id=function.id, kind="form_event")
+        return None
+
     @staticmethod
     def _function_from_lines(
         source_file: SourceFile,
@@ -176,23 +174,3 @@ class VbaFrontend:
             source_range=SourceRange(start_line=start + 1, end_line=end + 1),
             attributes={"visibility": visibility},
         )
-
-    @staticmethod
-    def _calls_in(function: Function) -> list[tuple[str, int, int]]:
-        calls: list[tuple[str, int, int]] = []
-        start_line = function.source_range.start_line
-        lines = function.source.splitlines()
-        for offset, line in enumerate(lines[1:], start=1):
-            code = line.split("'", maxsplit=1)[0]
-            found: set[tuple[str, int]] = set()
-            for pattern in (_EXPLICIT_CALL, _PAREN_CALL, _BARE_CALL):
-                for match in pattern.finditer(code):
-                    name = match.group(1)
-                    trailing = code[match.end(1) :].lstrip()
-                    if name.casefold() in _CONTROL_WORDS or trailing.startswith("="):
-                        continue
-                    position = (name.casefold(), match.start(1))
-                    if position not in found:
-                        found.add(position)
-                        calls.append((name, start_line + offset, match.start(1) + 1))
-        return calls

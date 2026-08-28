@@ -7,5 +7,6 @@ src/codegraph/vba.py
 src/codegraph.egg-info/PKG-INFO
 src/codegraph.egg-info/SOURCES.txt
 src/codegraph.egg-info/dependency_links.txt
+src/codegraph.egg-info/requires.txt
 src/codegraph.egg-info/top_level.txt
 tests/test_codebase.py

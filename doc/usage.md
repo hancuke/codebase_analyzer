@@ -110,8 +110,8 @@ for entry in result.affected_entry_points:
 
 ## 扩展状态
 
-`LanguageFrontend` 是公开协议：它需要实现 `supports(SourceFile)` 和批量 `analyze(Sequence[SourceFile]) -> FileAnalysis`。核心会保证支持的每份文件只交给一个前端。
+[`LanguageFrontend`](frontend.md) 是公开协议：它需要实现 `supports(SourceFile)` 和批量 `analyze(Sequence[SourceFile]) -> FileAnalysis`。核心会保证支持的每份文件只交给一个前端。
 
-MVP 自带 `VbaFrontend`，支持 `.bas`、`.cls`、`.frm` 文件中的 `Sub` 和 `Function`。它按 VBA 大小写不敏感的简单名称解析跨文件和前向调用；重名或未知目标会产生 `unresolved_call`，不会猜测建立边。
+MVP 自带 `VbaFrontend`，支持 `.bas`、`.cls`、`.frm` 文件中的 `Sub` 和 `Function`。它使用 Pygments 进行 token 化，忽略注释和字符串后识别常见 VBA 调用形式，再按 VBA 大小写不敏感的简单名称解析跨文件和前向调用；重名或未知目标会产生 `unresolved_call`，不会猜测建立边。
 
 跨语言链接器、HTTP/RPC/IDL 证据链接、复杂 VBA 语法、方法重载和上下文预算属于后续扩展，详见 [`design.md`](design.md) 与 [`architecture.md`](architecture.md)。

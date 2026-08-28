@@ -7,6 +7,9 @@ name = "codegraph"
 version = "0.1.0"
 description = "A small, language-independent code dependency graph library"
 requires-python = ">=3.10"
+dependencies = [
+    "pygments>=2.21.0",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
