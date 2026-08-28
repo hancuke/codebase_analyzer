@@ -1,124 +1,148 @@
-# CodeGraph MVP 使用指南
+# CodeGraph Usage Guide
 
-当前 MVP 提供完整文件分析、VBA `Sub`/`Function` 发现、可信的同语言调用图、入口上下文和全量刷新影响分析。它不调用 LLM，也不生成 prompt。
+CodeGraph is a language-independent static analysis library. It accepts complete source
+files and language frontends, then exposes source files, functions, calls, dependencies,
+entry points, diagnostics, and refresh impact.
 
-同时支持 Oracle PL/SQL package：`OraclePlsqlFrontend` 可解析 package spec/body
-中的过程和函数，并解析包内调用及 `other_package.procedure(...)` 形式的包限定调用。
+It does not read directories, execute code, call an LLM, or generate prompts. File
+discovery and downstream reporting remain the caller's responsibility.
 
-## 最小 VBA 示例
+## Analyze a codebase
 
 ```python
 from codegraph import Codebase, SourceFile, VbaFrontend
 
 codebase = Codebase.analyze(
     files=[
-        SourceFile(
-            "frmOrder.frm",
-            """
+        SourceFile("frmOrder.frm", """
 Private Sub bSave_Click()
     If ValidateOrder() Then
         Call SaveOrder
     End If
 End Sub
-""",
-        ),
-        SourceFile(
-            "modOrder.bas",
-            """
+""".lstrip()),
+        SourceFile("modOrder.bas", """
 Public Function ValidateOrder() As Boolean
+    ValidateOrder = LoadCustomer()
 End Function
 
 Public Sub SaveOrder()
 End Sub
-""",
-        ),
+
+Public Function LoadCustomer() As Boolean
+End Function
+""".lstrip()),
     ],
     frontends=[VbaFrontend()],
 )
 ```
 
-`Codebase.analyze()` 返回可查询的快照。不能解析的文件或调用不会阻止其他可靠结果产生，但会出现在 `codebase.diagnostics`。
+Each file must be supported by exactly one frontend. Unsupported files, ambiguous
+frontend ownership, duplicate paths, parse problems, and unresolved calls are reported
+through `codebase.diagnostics`. Reliable results from other files remain available.
 
-## 输入与诊断
-
-`SourceFile.path` 是快照内的唯一身份；刷新时以它替换或删除文件。`content` 必须是完整源码，`language="vba"` 可在扩展名不明确时指定 VBA 前端。
-
-PL/SQL package 文件通常使用 `.pks`（spec）或 `.pkb`（body）扩展名，也支持 `.sql`
-和 `.pls`。当 spec 与 body 同时提供时，函数实现以 body 为准，避免重复函数 ID。
+## Inspect diagnostics
 
 ```python
 for diagnostic in codebase.diagnostics:
     print(diagnostic.severity, diagnostic.code, diagnostic.message)
 ```
 
-MVP 会报告重复文件路径、无支持前端、多前端竞争、重复函数 ID、无效调用源/目标和无法解析的 VBA 调用。未解析调用保留在 `calls_from()` 的结果中，但不会成为依赖图边。
+Unresolved calls remain available through `calls_from()`, but do not become dependency
+graph edges.
 
-## 查询源文件、函数和调用
-
-源码文件会以路径的字典序返回；可查询全部文件、某一完整文件，以及该文件中完整的 `Function` 对象：
+## Locate source files
 
 ```python
 for source_file in codebase.source_files:
     print(source_file.path)
-    for function in codebase.functions_in_file(source_file.path):
-        print(function.id, function.source_range)
 
 module = codebase.source_file("modOrder.bas")
 module_functions = codebase.functions_in_file(module.path)
+
+bas_files = codebase.find_source_files(extension=".bas")
 ```
 
-`functions_in_file()` 对已分析但不含函数的文件返回空元组。`source_file()` 和
-`functions_in_file()` 对当前快照中不存在的路径抛出
-`SourceFileNotFoundError`，因此可与空文件明确区分。
+`source_files` is sorted by path. `functions_in_file()` returns complete immutable
+`Function` objects sorted by function ID. An analyzed file with no functions returns an
+empty tuple. An unknown path raises `SourceFileNotFoundError`.
 
-函数 ID 在同一代码库中唯一，并且不随其行号移动而改变：
+`find_source_files()` supports `path_prefix`, `language`, and `extension` filters.
+
+## Locate functions
 
 ```python
-save = "vba:frmOrder:bSave_Click"
-
-function = codebase.function(save)
-direct_dependencies = codebase.callees(save)
-all_dependencies = codebase.callees(save, transitive=True)
-direct_callers = codebase.callers("vba:modOrder:ValidateOrder")
-calls_in_source_order = codebase.calls_from(save)
+function = codebase.function("vba:frmOrder:bSave_Click")
+matching = codebase.find_functions(name="SaveOrder", language="vba")
+at_line = codebase.functions_at("modOrder.bas", 5)
 ```
 
-`callees()` 和 `callers()` 返回 `Function`；默认只返回直接关系。`calls_from()` 返回包含源码位置、原始调用名称、已解析目标（如有）和证据的 `Call`。循环调用的传递查询会安全结束，且不会把查询起点作为自己的结果。
+Function IDs are stable references and do not include line numbers. `find_functions()`
+can filter by name, qualified name, file, language, module, or an attribute key/value.
+`functions_at()` returns every function containing the requested one-based source line.
 
-未知函数 ID 会抛出 `FunctionNotFoundError`。如只需探测是否存在，可使用 `get_function()`，它会返回 `None`。
+Unknown IDs raise `FunctionNotFoundError`; use `get_function()` when a nullable lookup is
+more convenient.
 
-## 管理入口和获取上下文
+## Inspect calls and dependencies
 
-VBA 名称以 `_Click` 结尾的过程会作为候选入口，但只有调用者确认后才成为入口：
+```python
+calls = codebase.calls_from(function.id)
+resolved = codebase.calls_from(function.id, resolution="resolved")
+unresolved = codebase.calls_from(function.id, resolution="unresolved")
+incoming = codebase.calls_to("vba:modOrder:ValidateOrder")
+
+direct = codebase.callees(function.id)
+all_dependencies = codebase.callees(function.id, transitive=True)
+callers = codebase.callers(function.id, transitive=True)
+```
+
+`Call` records the source function, original call name, source line, resolved target
+when known, and resolution evidence. Cycles are handled safely and never return the
+starting function as its own dependency.
+
+## Manage entry points and context
+
+Frontends may suggest entry points, but callers decide which suggestions are business
+entries:
 
 ```python
 codebase.accept_entry_candidates()
-
-# 或由业务规则追加入口。
 codebase.mark_entries(
     lambda function: function.attributes.get("visibility") == "public",
     kind="public_procedure",
 )
-
-# 替换为手工确认的入口。
 codebase.set_entries(["vba:frmOrder:bSave_Click"], kind="form_event")
 
 context = codebase.context_for("vba:frmOrder:bSave_Click")
 for function in context.functions:
-    print(function.qualified_name, function.source)
+    print(function.id, function.source)
 ```
 
-`AnalysisContext` 包含入口、可达函数、这些函数之间的已确定调用、每个函数的一条入口路径以及相关诊断。尚未实现来源大小、函数数量或深度预算；上层可先使用 `context.functions` 自行裁剪。
+Entries can be removed with `remove_entries(function_ids, kind=...)`.
 
-## 刷新和影响入口
+Use `ContextLimits` to bound context size:
 
-刷新始终重新分析当前全部文件，以保证跨文件调用不会过期：
+```python
+from codegraph import ContextLimits
+
+context = codebase.context_for(
+    "vba:frmOrder:bSave_Click",
+    limits=ContextLimits(
+        max_depth=8,
+        max_functions=80,
+        max_source_chars=30_000,
+    ),
+)
+if context.truncated:
+    print(context.truncation_reasons)
+```
+
+## Refresh and impact analysis
 
 ```python
 result = codebase.refresh(
-    changed_files=[
-        SourceFile("modOrder.bas", changed_module_source),
-    ],
+    changed_files=[SourceFile("modOrder.bas", changed_source)],
     removed_paths=["legacy/modOldOrder.bas"],
 )
 
@@ -128,12 +152,12 @@ for entry in result.affected_entry_points:
     print("reanalyze:", entry.function_id)
 ```
 
-`RefreshResult` 列出函数变化、出边变化的源函数、刷新诊断和受影响的**刷新前已确认**入口。影响计算同时检查旧图和新图，因此删除函数或删除调用不会漏掉先前依赖它的入口。
+Refresh replaces changed paths, removes requested paths, rebuilds the current snapshot,
+and reports changed functions, changed call sources, affected confirmed entries, and
+diagnostics. It checks both the old and new graphs, so removed functions and deleted calls
+still identify previously affected entries.
 
-## 扩展状态
+## Add a language frontend
 
-[`LanguageFrontend`](frontend.md) 是公开协议：它需要实现 `supports(SourceFile)` 和批量 `analyze(Sequence[SourceFile]) -> FileAnalysis`。核心会保证支持的每份文件只交给一个前端。
-
-MVP 自带 `VbaFrontend`，支持 `.bas`、`.cls`、`.frm` 文件中的 `Sub` 和 `Function`。它使用 Pygments 进行 token 化，忽略注释和字符串后识别常见 VBA 调用形式，再按 VBA 大小写不敏感的简单名称解析跨文件和前向调用；重名或未知目标会产生 `unresolved_call`，不会猜测建立边。
-
-跨语言链接器、HTTP/RPC/IDL 证据链接、复杂 VBA 语法、方法重载和上下文预算属于后续扩展，详见 [`design.md`](design.md) 与 [`architecture.md`](architecture.md)。
+Implement `LanguageFrontend`, or inherit from `BaseFrontend` and provide language-specific
+function and call extraction. See [`frontend.md`](frontend.md).

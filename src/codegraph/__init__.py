@@ -3,6 +3,7 @@ from .frontend import BaseFrontend, LanguageFrontend, RawCall
 from .model import (
     AnalysisContext,
     Call,
+    ContextLimits,
     Diagnostic,
     EntryCandidate,
     EntryPoint,
@@ -20,6 +21,7 @@ __all__ = [
     "BaseFrontend",
     "Call",
     "Codebase",
+    "ContextLimits",
     "Diagnostic",
     "EntryCandidate",
     "EntryPoint",

@@ -26,10 +26,10 @@ End Sub
     frontends=[VbaFrontend()],
 )
 
-for diagnostic in codebase.diagnostics:
-    print(diagnostic.severity, diagnostic.code, diagnostic.message)
+for source_file in codebase.source_files:
+    print(source_file.path)
+    for function in codebase.functions_in_file(source_file.path):
+        print(function.id, function.source)
 
-save = "vba:frmOrder:bSave_Click"
-function = codebase.function(save)
-direct_dependencies = codebase.callees(save)
-print(direct_dependencies)
+module = codebase.source_file("modOrder.bas")
+module_functions = codebase.functions_in_file(module.path)

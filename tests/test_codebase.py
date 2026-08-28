@@ -3,6 +3,7 @@ import pytest
 from codegraph import (
     BaseFrontend,
     Codebase,
+    ContextLimits,
     Diagnostic,
     FileAnalysis,
     Function,
@@ -167,6 +168,75 @@ def test_source_file_queries_distinguish_unknown_and_empty_files() -> None:
         codebase.source_file("missing.bas")
     with pytest.raises(SourceFileNotFoundError):
         codebase.functions_in_file("missing.bas")
+
+
+def test_file_and_function_filters_are_deterministic() -> None:
+    codebase = build_codebase()
+
+    assert [item.path for item in codebase.find_source_files(extension=".BAS")] == [
+        "modOrder.bas"
+    ]
+    assert [item.id for item in codebase.find_functions(name="SaveOrder")] == [
+        "vba:modOrder:SaveOrder"
+    ]
+    assert [item.id for item in codebase.functions_at("modOrder.bas", 5)] == [
+        "vba:modOrder:SaveOrder"
+    ]
+
+
+def test_call_resolution_filters_and_reverse_call_facts() -> None:
+    codebase = Codebase.analyze(
+        [
+            SourceFile(
+                "modCalls.bas",
+                """
+Public Sub Main()
+    Call SaveOrder
+    Call MissingProcedure
+End Sub
+
+Public Sub SaveOrder()
+End Sub
+""".lstrip(),
+            )
+        ],
+        [VbaFrontend()],
+    )
+
+    assert [call.name for call in codebase.calls_from(
+        "vba:modCalls:Main", resolution="resolved"
+    )] == ["SaveOrder"]
+    assert [call.name for call in codebase.calls_from(
+        "vba:modCalls:Main", resolution="unresolved"
+    )] == ["MissingProcedure"]
+    assert [call.source_id for call in codebase.calls_to("vba:modCalls:SaveOrder")] == [
+        "vba:modCalls:Main"
+    ]
+
+
+def test_context_limits_report_truncation() -> None:
+    codebase = build_codebase()
+    context = codebase.context_for(
+        "vba:frmOrder:bSave_Click",
+        limits=ContextLimits(max_depth=1, max_functions=2),
+    )
+
+    assert context.truncated is True
+    assert context.truncation_reasons == ("max_functions",)
+    assert len(context.functions) == 2
+
+
+def test_entries_can_be_removed_by_id_or_kind() -> None:
+    codebase = build_codebase()
+    codebase.accept_entry_candidates()
+    codebase.mark_entries(lambda function: function.name == "SaveOrder", kind="manual")
+
+    codebase.remove_entries(["vba:frmOrder:bSave_Click"])
+    assert [entry.function_id for entry in codebase.entry_points] == [
+        "vba:modOrder:SaveOrder"
+    ]
+    codebase.remove_entries(kind="manual")
+    assert codebase.entry_points == ()
 
 
 def test_refresh_updates_source_file_function_queries() -> None:

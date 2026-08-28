@@ -13,6 +13,13 @@ class SourceFile:
 
 
 @dataclass(frozen=True)
+class ContextLimits:
+    max_depth: int | None = None
+    max_functions: int | None = None
+    max_source_chars: int | None = None
+
+
+@dataclass(frozen=True)
 class SourceRange:
     start_line: int
     end_line: int
@@ -85,6 +92,8 @@ class AnalysisContext:
     calls: tuple[Call, ...]
     paths: tuple[tuple[str, ...], ...]
     diagnostics: tuple[Diagnostic, ...]
+    truncated: bool = False
+    truncation_reasons: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
