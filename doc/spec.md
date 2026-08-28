@@ -104,6 +104,20 @@ codebase.callees(save)
 codebase.callers(submit)
 ```
 
+### 查询源文件及其函数
+
+`source_files` 返回当前快照内全部 `SourceFile`，按路径排序。使用
+`source_file(path)` 可取得一个指定文件，使用 `functions_in_file(path)` 可取得其
+完整 `Function` 对象，按函数 ID 排序：
+
+```python
+for source_file in codebase.source_files:
+    functions = codebase.functions_in_file(source_file.path)
+```
+
+已分析但没有可发现函数的文件会返回空元组。指定路径不在当前快照时，
+`source_file()` 和 `functions_in_file()` 都抛出 `SourceFileNotFoundError`。
+
 ## 语言前端
 
 不同语言的语法不同，所以每种语言由自己的 Frontend 负责理解。

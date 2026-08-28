@@ -9,6 +9,7 @@ from codegraph import (
     FunctionNotFoundError,
     RawCall,
     SourceFile,
+    SourceFileNotFoundError,
     SourceRange,
     VbaFrontend,
 )
@@ -138,6 +139,58 @@ End Sub
 def test_unknown_function_has_one_clear_error_type() -> None:
     with pytest.raises(FunctionNotFoundError):
         build_codebase().function("vba:missing:Function")
+
+
+def test_source_files_and_functions_can_be_queried_by_file() -> None:
+    codebase = build_codebase()
+
+    assert [source_file.path for source_file in codebase.source_files] == [
+        "frmOrder.frm",
+        "modOrder.bas",
+    ]
+    assert codebase.source_file("frmOrder.frm").content.startswith("Private Sub")
+    assert [function.id for function in codebase.functions_in_file("modOrder.bas")] == [
+        "vba:modOrder:LoadCustomer",
+        "vba:modOrder:SaveOrder",
+        "vba:modOrder:ValidateOrder",
+    ]
+
+
+def test_source_file_queries_distinguish_unknown_and_empty_files() -> None:
+    codebase = Codebase.analyze(
+        [SourceFile("empty.bas", "Option Explicit\n")],
+        [VbaFrontend()],
+    )
+
+    assert codebase.functions_in_file("empty.bas") == ()
+    with pytest.raises(SourceFileNotFoundError):
+        codebase.source_file("missing.bas")
+    with pytest.raises(SourceFileNotFoundError):
+        codebase.functions_in_file("missing.bas")
+
+
+def test_refresh_updates_source_file_function_queries() -> None:
+    codebase = build_codebase()
+
+    codebase.refresh(
+        [
+            SourceFile(
+                "modOrder.bas",
+                """
+Public Sub SaveOrder()
+End Sub
+""".lstrip(),
+            )
+        ],
+        removed_paths=["frmOrder.frm"],
+    )
+
+    assert [source_file.path for source_file in codebase.source_files] == ["modOrder.bas"]
+    assert [function.id for function in codebase.functions_in_file("modOrder.bas")] == [
+        "vba:modOrder:SaveOrder"
+    ]
+    with pytest.raises(SourceFileNotFoundError):
+        codebase.functions_in_file("frmOrder.frm")
 
 
 def test_files_require_exactly_one_frontend() -> None:

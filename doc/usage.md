@@ -2,6 +2,9 @@
 
 当前 MVP 提供完整文件分析、VBA `Sub`/`Function` 发现、可信的同语言调用图、入口上下文和全量刷新影响分析。它不调用 LLM，也不生成 prompt。
 
+同时支持 Oracle PL/SQL package：`OraclePlsqlFrontend` 可解析 package spec/body
+中的过程和函数，并解析包内调用及 `other_package.procedure(...)` 形式的包限定调用。
+
 ## 最小 VBA 示例
 
 ```python
@@ -40,6 +43,9 @@ End Sub
 
 `SourceFile.path` 是快照内的唯一身份；刷新时以它替换或删除文件。`content` 必须是完整源码，`language="vba"` 可在扩展名不明确时指定 VBA 前端。
 
+PL/SQL package 文件通常使用 `.pks`（spec）或 `.pkb`（body）扩展名，也支持 `.sql`
+和 `.pls`。当 spec 与 body 同时提供时，函数实现以 body 为准，避免重复函数 ID。
+
 ```python
 for diagnostic in codebase.diagnostics:
     print(diagnostic.severity, diagnostic.code, diagnostic.message)
@@ -47,7 +53,23 @@ for diagnostic in codebase.diagnostics:
 
 MVP 会报告重复文件路径、无支持前端、多前端竞争、重复函数 ID、无效调用源/目标和无法解析的 VBA 调用。未解析调用保留在 `calls_from()` 的结果中，但不会成为依赖图边。
 
-## 查询函数和调用
+## 查询源文件、函数和调用
+
+源码文件会以路径的字典序返回；可查询全部文件、某一完整文件，以及该文件中完整的 `Function` 对象：
+
+```python
+for source_file in codebase.source_files:
+    print(source_file.path)
+    for function in codebase.functions_in_file(source_file.path):
+        print(function.id, function.source_range)
+
+module = codebase.source_file("modOrder.bas")
+module_functions = codebase.functions_in_file(module.path)
+```
+
+`functions_in_file()` 对已分析但不含函数的文件返回空元组。`source_file()` 和
+`functions_in_file()` 对当前快照中不存在的路径抛出
+`SourceFileNotFoundError`，因此可与空文件明确区分。
 
 函数 ID 在同一代码库中唯一，并且不随其行号移动而改变：
 

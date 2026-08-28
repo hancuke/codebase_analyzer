@@ -1,4 +1,4 @@
-from .core import Codebase, FunctionNotFoundError
+from .core import Codebase, FunctionNotFoundError, SourceFileNotFoundError
 from .frontend import BaseFrontend, LanguageFrontend, RawCall
 from .model import (
     AnalysisContext,
@@ -12,8 +12,8 @@ from .model import (
     SourceFile,
     SourceRange,
 )
-from .vba import VbaFrontend
 from .oracle import OraclePlsqlFrontend
+from .vba import VbaFrontend
 
 __all__ = [
     "AnalysisContext",
@@ -30,6 +30,7 @@ __all__ = [
     "RawCall",
     "RefreshResult",
     "SourceFile",
+    "SourceFileNotFoundError",
     "SourceRange",
     "VbaFrontend",
     "OraclePlsqlFrontend",

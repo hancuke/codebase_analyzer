@@ -21,6 +21,10 @@ class FunctionNotFoundError(KeyError):
     """Raised when a function identifier is not present in a codebase."""
 
 
+class SourceFileNotFoundError(KeyError):
+    """Raised when a source file path is not present in a codebase."""
+
+
 class Codebase:
     """A queryable snapshot of functions and reliable direct calls."""
 
@@ -43,6 +47,7 @@ class Codebase:
         self._entries: dict[tuple[str, str, str], EntryPoint] = {}
         self._forward: dict[str, tuple[str, ...]] = {}
         self._reverse: dict[str, tuple[str, ...]] = {}
+        self._functions_by_file: dict[str, tuple[Function, ...]] = {}
         self._build_indexes()
 
     @classmethod
@@ -208,6 +213,20 @@ class Codebase:
     def functions(self) -> tuple[Function, ...]:
         return tuple(self._functions[function_id] for function_id in sorted(self._functions))
 
+    @property
+    def source_files(self) -> tuple[SourceFile, ...]:
+        return tuple(self._files[path] for path in sorted(self._files))
+
+    def source_file(self, path: str) -> SourceFile:
+        try:
+            return self._files[str(path)]
+        except KeyError as error:
+            raise SourceFileNotFoundError(path) from error
+
+    def functions_in_file(self, path: str) -> tuple[Function, ...]:
+        self.source_file(path)
+        return self._functions_by_file[str(path)]
+
     def function(self, function_id: str) -> Function:
         try:
             return self._functions[str(function_id)]
@@ -365,6 +384,16 @@ class Codebase:
         )
 
     def _build_indexes(self) -> None:
+        functions_by_file: dict[str, list[Function]] = {
+            path: [] for path in self._files
+        }
+        for function in self._functions.values():
+            functions_by_file.setdefault(function.file, []).append(function)
+        self._functions_by_file = {
+            path: tuple(sorted(functions, key=lambda function: function.id))
+            for path, functions in functions_by_file.items()
+        }
+
         forward: dict[str, set[str]] = defaultdict(set)
         reverse: dict[str, set[str]] = defaultdict(set)
         for call in self._calls:
