@@ -94,11 +94,3 @@ class AnalysisContext:
     diagnostics: tuple[Diagnostic, ...]
     truncated: bool = False
     truncation_reasons: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True)
-class RefreshResult:
-    changed_function_ids: tuple[str, ...]
-    changed_call_source_ids: tuple[str, ...]
-    affected_entry_points: tuple[EntryPoint, ...]
-    diagnostics: tuple[Diagnostic, ...]

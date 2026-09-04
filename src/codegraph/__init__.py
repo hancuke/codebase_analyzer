@@ -9,7 +9,6 @@ from .model import (
     EntryPoint,
     FileAnalysis,
     Function,
-    RefreshResult,
     SourceFile,
     SourceRange,
 )
@@ -30,7 +29,6 @@ __all__ = [
     "FunctionNotFoundError",
     "LanguageFrontend",
     "RawCall",
-    "RefreshResult",
     "SourceFile",
     "SourceFileNotFoundError",
     "SourceRange",

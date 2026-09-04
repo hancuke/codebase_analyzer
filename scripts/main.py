@@ -26,10 +26,10 @@ End Sub
     frontends=[VbaFrontend()],
 )
 
-for source_file in codebase.source_files:
+for source_file in codebase.context_for:
     print(source_file.path)
     for function in codebase.functions_in_file(source_file.path):
         print(function.id, function.source)
 
 module = codebase.source_file("modOrder.bas")
-module_functions = codebase.functions_in_file(module.path)
+module_functions = codebase.functions_in_file(module.path) 

@@ -112,31 +112,6 @@ End Sub
     ]
 
 
-def test_refresh_finds_an_entry_affected_by_a_removed_function() -> None:
-    codebase = build_codebase()
-    codebase.set_entries(["vba:frmOrder:bSave_Click"], kind="form_event")
-
-    result = codebase.refresh(
-        [
-            SourceFile(
-                "modOrder.bas",
-                """
-Public Sub SaveOrder()
-End Sub
-""".lstrip(),
-            )
-        ]
-    )
-
-    assert "vba:modOrder:ValidateOrder" in result.changed_function_ids
-    assert [entry.function_id for entry in result.affected_entry_points] == [
-        "vba:frmOrder:bSave_Click"
-    ]
-    assert [item.id for item in codebase.callees("vba:frmOrder:bSave_Click")] == [
-        "vba:modOrder:SaveOrder"
-    ]
-
-
 def test_unknown_function_has_one_clear_error_type() -> None:
     with pytest.raises(FunctionNotFoundError):
         build_codebase().function("vba:missing:Function")
@@ -237,30 +212,6 @@ def test_entries_can_be_removed_by_id_or_kind() -> None:
     ]
     codebase.remove_entries(kind="manual")
     assert codebase.entry_points == ()
-
-
-def test_refresh_updates_source_file_function_queries() -> None:
-    codebase = build_codebase()
-
-    codebase.refresh(
-        [
-            SourceFile(
-                "modOrder.bas",
-                """
-Public Sub SaveOrder()
-End Sub
-""".lstrip(),
-            )
-        ],
-        removed_paths=["frmOrder.frm"],
-    )
-
-    assert [source_file.path for source_file in codebase.source_files] == ["modOrder.bas"]
-    assert [function.id for function in codebase.functions_in_file("modOrder.bas")] == [
-        "vba:modOrder:SaveOrder"
-    ]
-    with pytest.raises(SourceFileNotFoundError):
-        codebase.functions_in_file("frmOrder.frm")
 
 
 def test_files_require_exactly_one_frontend() -> None:

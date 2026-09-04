@@ -13,7 +13,6 @@ from .model import (
     EntryPoint,
     FileAnalysis,
     Function,
-    RefreshResult,
     SourceFile,
 )
 
@@ -441,71 +440,6 @@ class Codebase:
             truncation_reasons=tuple(reasons),
         )
 
-    def refresh(
-        self,
-        changed_files: Sequence[SourceFile] = (),
-        *,
-        removed_paths: Sequence[str] = (),
-    ) -> RefreshResult:
-        changed_paths = {source_file.path for source_file in changed_files}
-        removed = set(removed_paths)
-        overlap = changed_paths & removed
-        if overlap:
-            raise ValueError(
-                "A path cannot be changed and removed in one refresh: "
-                + ", ".join(sorted(overlap))
-            )
-
-        old_functions = self._functions
-        old_edges = self._edge_set()
-        old_reverse = self._reverse
-        old_entries = self.entry_points
-        new_files = dict(self._files)
-        for path in removed:
-            new_files.pop(path, None)
-        for source_file in changed_files:
-            new_files[source_file.path] = source_file
-        rebuilt = self.analyze(tuple(new_files.values()), self._frontends)
-
-        new_edges = rebuilt._edge_set()
-        changed_function_ids = {
-            function_id
-            for function_id in set(old_functions) | set(rebuilt._functions)
-            if old_functions.get(function_id) != rebuilt._functions.get(function_id)
-        }
-        changed_call_sources = {
-            source_id
-            for source_id in set(old_functions) | set(rebuilt._functions)
-            if {
-                edge for edge in old_edges if edge[0] == source_id
-            }
-            != {
-                edge for edge in new_edges if edge[0] == source_id
-            }
-        }
-        seeds = changed_function_ids | changed_call_sources
-        affected_ids = self._ancestors_in(seeds, old_reverse) | self._ancestors_in(
-            seeds, rebuilt._reverse
-        )
-        affected_entries = tuple(
-            entry
-            for entry in old_entries
-            if entry.function_id in affected_ids
-        )
-
-        rebuilt._entries = {
-            key: entry
-            for key, entry in self._entries.items()
-            if entry.function_id in rebuilt._functions
-        }
-        self.__dict__.update(rebuilt.__dict__)
-        return RefreshResult(
-            changed_function_ids=tuple(sorted(changed_function_ids)),
-            changed_call_source_ids=tuple(sorted(changed_call_sources)),
-            affected_entry_points=affected_entries,
-            diagnostics=self._diagnostics,
-        )
-
     def _build_indexes(self) -> None:
         functions_by_file: dict[str, list[Function]] = {
             path: [] for path in self._files
@@ -580,26 +514,3 @@ class Codebase:
         self.function(function_id)
         entry = EntryPoint(function_id=function_id, kind=kind, source=source)
         self._entries[(function_id, kind, source)] = entry
-
-    def _edge_set(self) -> set[tuple[str, str]]:
-        return {
-            (call.source_id, call.target_id)
-            for call in self._calls
-            if call.target_id is not None
-            and call.source_id in self._functions
-            and call.target_id in self._functions
-        }
-
-    @staticmethod
-    def _ancestors_in(
-        seeds: Iterable[str], index: dict[str, tuple[str, ...]]
-    ) -> set[str]:
-        affected = set(seeds)
-        pending = deque(seeds)
-        while pending:
-            function_id = pending.popleft()
-            for caller_id in index.get(function_id, ()):
-                if caller_id not in affected:
-                    affected.add(caller_id)
-                    pending.append(caller_id)
-        return affected

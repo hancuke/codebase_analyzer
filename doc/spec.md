@@ -68,9 +68,8 @@ unexpected programming errors must not be converted into successful empty result
 - `callees()`, `callers()`, and their transitive variants;
 - entry candidate acceptance, entry marking, replacement, removal, and enumeration;
 - bounded `context_for()`;
-- `refresh()` and change-impact results.
 
-Queries are read-only except for explicit entry management and refresh operations. Results
+Queries are read-only except for explicit entry management. Results
 are immutable and deterministically ordered.
 
 ## Context limits
@@ -91,15 +90,10 @@ Frontends may batch files from one language to resolve forward and cross-file re
 They must return `FileAnalysis` containing functions, calls, entry candidates, and
 diagnostics. Language-specific rules must remain in the frontend.
 
-## Refresh contract
-
-`refresh()` replaces changed paths, removes requested paths, rebuilds the current set of
-files, and compares old and new functions and graph edges. It must report affected
-confirmed entries even when a function or call was removed.
-
 ## Non-goals
 
 - directory traversal and project discovery;
+- source change tracking and impact analysis;
 - code execution or compilation;
 - guaranteed resolution of dynamic dispatch, reflection, macros, or runtime loading;
 - automatic business-entry selection;

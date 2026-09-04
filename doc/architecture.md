@@ -29,7 +29,7 @@ relationships across languages.
 | --- | --- |
 | Caller adapters | Discover files, read projects, serialize results, render reports. |
 | Public facade | Accept snapshots and frontends; expose domain queries and results. |
-| Core domain | Validate facts, index files/functions/calls, traverse dependencies, manage entries, calculate refresh impact. |
+| Core domain | Validate facts, index files/functions/calls, traverse dependencies, and manage entries. |
 | Language frontend | Parse one language, resolve reliable same-language calls, emit entry hints and diagnostics. |
 
 Language frontends are the only language-specific extension point. A frontend may analyze
@@ -50,13 +50,6 @@ SourceFile[]
 
 All functions are collected before calls are resolved. Confirmed calls become graph edges;
 unresolved calls remain available through call facts and diagnostics.
-
-## Snapshot and refresh
-
-The current implementation rebuilds the full snapshot on refresh. It compares old and new
-function identities and outgoing graph edges, then follows both old and new reverse graphs
-to identify affected confirmed entries. Future caching or incremental implementations must
-preserve the same observable results.
 
 ## Public model rules
 

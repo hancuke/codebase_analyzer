@@ -4,8 +4,7 @@
 
 CodeGraph answers a practical static-analysis question:
 
-> Which code is reachable from a selected function, and which callers are affected when
-> source code changes?
+> Which code is reachable from a selected function?
 
 The caller supplies complete source files and one or more language frontends. CodeGraph
 returns traceable facts and composable queries. It does not expose ASTs, graph indexes,
@@ -24,7 +23,6 @@ relationships within each language. Cross-language linking is outside the public
 | `Diagnostic` | Machine-readable analysis issue with severity and source location. |
 | `EntryPoint` | Caller-confirmed business starting point. |
 | `AnalysisContext` | Bounded reachable functions, calls, paths, and diagnostics. |
-| `RefreshResult` | Function/call changes and affected confirmed entries. |
 
 Function IDs are persistent references for caching and downstream integrations. They must
 remain stable when a function moves within a file.
@@ -64,19 +62,14 @@ Confirm entry points explicitly, then call `context_for()` with optional
 `ContextLimits`. The context is suitable for documentation, indexing, review, or RAG
 pipelines. CodeGraph does not decide tokenization or downstream formatting.
 
-### Analyze changes
-
-Call `refresh()` with changed and removed files. The result identifies changed functions,
-changed outgoing edges, and confirmed entries whose analysis should be regenerated.
-
 ## Extension boundary
 
 A language frontend owns language syntax, name resolution, case sensitivity, overloads,
 packages, entry hints, and language diagnostics. The core owns routing, aggregation,
-validation, indexing, traversal, entry management, and refresh impact.
+validation, indexing, traversal, and entry management.
 
-Filesystem/project discovery, CLI behavior, serialization, reports, and downstream AI
-services should be implemented as separate adapters.
+Filesystem/project discovery, change tracking, CLI behavior, serialization, reports, and
+downstream AI services should be implemented as separate adapters.
 
 ## Reliability principles
 

@@ -2,7 +2,7 @@
 
 CodeGraph is a language-independent static analysis library. It accepts complete source
 files and language frontends, then exposes source files, functions, calls, dependencies,
-entry points, diagnostics, and refresh impact.
+entry points, and diagnostics.
 
 It does not read directories, execute code, call an LLM, or generate prompts. File
 discovery and downstream reporting remain the caller's responsibility.
@@ -137,25 +137,6 @@ context = codebase.context_for(
 if context.truncated:
     print(context.truncation_reasons)
 ```
-
-## Refresh and impact analysis
-
-```python
-result = codebase.refresh(
-    changed_files=[SourceFile("modOrder.bas", changed_source)],
-    removed_paths=["legacy/modOldOrder.bas"],
-)
-
-for function_id in result.changed_function_ids:
-    print("changed:", function_id)
-for entry in result.affected_entry_points:
-    print("reanalyze:", entry.function_id)
-```
-
-Refresh replaces changed paths, removes requested paths, rebuilds the current snapshot,
-and reports changed functions, changed call sources, affected confirmed entries, and
-diagnostics. It checks both the old and new graphs, so removed functions and deleted calls
-still identify previously affected entries.
 
 ## Add a language frontend
 
