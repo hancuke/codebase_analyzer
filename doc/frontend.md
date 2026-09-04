@@ -1,12 +1,12 @@
-# Writing a CodeGraph Language Frontend
+# Writing a CodeGraph Language Analyzer
 
-A language frontend converts complete source files into CodeGraph facts: functions, calls,
-entry candidates, and diagnostics. The frontend understands language syntax; `Codebase`
+A language analyzer converts complete source files into CodeGraph facts: functions, calls,
+entry points, and diagnostics. The analyzer understands language syntax; `Codebase`
 validates, indexes, and queries the results.
 
 ## Recommended approach
 
-Inherit from `BaseFrontend`:
+Inherit from `BaseAnalyzer` (the current compatibility name is `BaseFrontend`):
 
 ```python
 from codegraph import BaseFrontend, Diagnostic, Function, RawCall, SourceFile
@@ -26,30 +26,30 @@ class PythonFrontend(BaseFrontend):
         return [RawCall(name="calculate_total", line=15)]
 ```
 
-The base class handles frontend batching, symbol indexing, call resolution, unresolved-call
-diagnostics, and `FileAnalysis` construction.
+The base class handles analyzer batching, symbol indexing, call resolution, unresolved-call
+diagnostics, entry-point detection, and `AnalysisResult` construction.
 
-## Frontend protocol
+## Language analyzer protocol
 
 For a custom pipeline, implement:
 
 ```python
-class LanguageFrontend(Protocol):
+class LanguageAnalyzer(Protocol):
     def supports(self, file: SourceFile) -> bool: ...
-    def analyze(self, files: Sequence[SourceFile]) -> FileAnalysis: ...
+    def analyze(self, files: Sequence[SourceFile]) -> AnalysisResult: ...
 ```
 
-The input contains complete files already assigned to the frontend. The file order must
-not change the result. A frontend may analyze multiple files together for same-language
+The input contains complete files already assigned to the analyzer. The file order must
+not change the result. An analyzer may analyze multiple files together for same-language
 cross-file and forward references.
 
-## Required frontend behavior
+## Required analyzer behavior
 
 ### File ownership
 
 `supports()` should honor an explicit `SourceFile.language` first and use the extension as
 a fallback. Do not claim every unknown extension, and do not inspect source content with
-complex heuristics to compete with another frontend.
+complex heuristics to compete with another analyzer.
 
 ### Function extraction
 
@@ -59,10 +59,10 @@ Each `Function` must have:
 2. a unique language/module namespace;
 3. the original source text;
 4. a one-based inclusive source range;
-5. the input file path in `Function.file`.
+5. the input source identifier in `Function.source_id`.
 
 Language-specific case rules, overloads, classes, packages, and nested functions belong in
-the frontend's IDs and resolution logic.
+the analyzer's IDs and resolution logic.
 
 ### Call extraction
 
@@ -70,13 +70,14 @@ Return one `RawCall` per discovered call site. Resolve a target only when langua
 semantics make the target reliable. For ambiguous, dynamic, reflective, or unsupported
 calls, return no target and emit a diagnostic rather than guessing.
 
-### Entry candidates
+### Entry points
 
-`detect_entry_candidate()` may identify language-level hints such as form events, `main`
-functions, tests, scheduled jobs, or controllers. The caller must explicitly accept or
-replace the entry set.
+`detect_entry_point()` identifies language-level structural entries such as form events,
+`main` functions, tests, scheduled jobs, or controllers. If the classification is
+unsuitable, change the analyzer rule; the core does not maintain a second entry
+confirmation workflow.
 
-## BaseFrontend hooks
+## BaseAnalyzer hooks
 
 | Hook | Purpose |
 | --- | --- |
@@ -85,7 +86,7 @@ replace the entry set.
 | `is_case_sensitive` | Name and extension normalization behavior. |
 | `extract_functions(file)` | Return functions and file diagnostics. |
 | `extract_raw_calls(function)` | Return unresolved call sites. |
-| `detect_entry_candidate(function)` | Optionally return an entry hint. |
+| `detect_entry_point(function)` | Optionally return a structural entry point. |
 | `resolve_target(...)` | Override name resolution for language semantics. |
 
 ## Failure and determinism rules

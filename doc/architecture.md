@@ -8,7 +8,7 @@ CodeGraph is a small static-analysis core with a stable public boundary:
 caller-provided source snapshot
         |
         v
-frontend routing and analysis
+language analyzer routing and analysis
         |
         v
 validated functions, calls, diagnostics
@@ -28,21 +28,21 @@ relationships across languages.
 | Layer | Responsibility |
 | --- | --- |
 | Caller adapters | Discover files, read projects, serialize results, render reports. |
-| Public facade | Accept snapshots and frontends; expose domain queries and results. |
-| Core domain | Validate facts, index files/functions/calls, traverse dependencies, and manage entries. |
-| Language frontend | Parse one language, resolve reliable same-language calls, emit entry hints and diagnostics. |
+| Public facade | Accept snapshots and language analyzers; expose domain queries and results. |
+| Core domain | Validate facts, index files/functions/calls, traverse dependencies, and expose entries. |
+| Language analyzer | Parse one language, resolve reliable same-language calls, identify entries, and emit diagnostics. |
 
-Language frontends are the only language-specific extension point. A frontend may analyze
+Language analyzers are the only language-specific extension point. An analyzer may analyze
 a batch of files from its language to support forward and cross-file references.
 
 ## Analysis flow
 
 ```text
 SourceFile[]
-   -> validate unique paths
-   -> route each file to exactly one frontend
-   -> analyze frontend batches
-   -> aggregate functions, calls, entry hints, diagnostics
+   -> validate unique source identifiers
+   -> route each file to exactly one analyzer
+   -> analyze analyzer batches
+   -> aggregate functions, calls, entries, diagnostics
    -> validate call sources and targets
    -> build file/function and forward/reverse indexes
    -> expose Codebase
@@ -53,7 +53,7 @@ unresolved calls remain available through call facts and diagnostics.
 
 ## Public model rules
 
-- `SourceFile.path` is the snapshot identity.
+- `SourceFile.source_id` is the snapshot identity.
 - `Function.id` is stable and unique within the codebase.
 - `SourceRange` is one-based and inclusive.
 - `Call.target_id` is present only for reliable resolution.

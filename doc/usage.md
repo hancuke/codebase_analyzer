@@ -1,7 +1,7 @@
 # CodeGraph Usage Guide
 
 CodeGraph is a language-independent static analysis library. It accepts complete source
-files and language frontends, then exposes source files, functions, calls, dependencies,
+files and language analyzers, then exposes source files, functions, calls, dependencies,
 entry points, and diagnostics.
 
 It does not read directories, execute code, call an LLM, or generate prompts. File
@@ -14,14 +14,14 @@ from codegraph import Codebase, SourceFile, VbaFrontend
 
 codebase = Codebase.analyze(
     files=[
-        SourceFile("frmOrder.frm", """
+        SourceFile(source_id="frmOrder.frm", content="""
 Private Sub bSave_Click()
     If ValidateOrder() Then
         Call SaveOrder
     End If
 End Sub
 """.lstrip()),
-        SourceFile("modOrder.bas", """
+        SourceFile(source_id="modOrder.bas", content="""
 Public Function ValidateOrder() As Boolean
     ValidateOrder = LoadCustomer()
 End Function
@@ -37,8 +37,8 @@ End Function
 )
 ```
 
-Each file must be supported by exactly one frontend. Unsupported files, ambiguous
-frontend ownership, duplicate paths, parse problems, and unresolved calls are reported
+Each file must be supported by exactly one analyzer. Unsupported files, ambiguous
+frontend ownership, duplicate source identifiers, parse problems, and unresolved calls are reported
 through `codebase.diagnostics`. Reliable results from other files remain available.
 
 ## Inspect diagnostics
@@ -55,19 +55,19 @@ graph edges.
 
 ```python
 for source_file in codebase.source_files:
-    print(source_file.path)
+    print(source_file.source_id)
 
 module = codebase.source_file("modOrder.bas")
-module_functions = codebase.functions_in_file(module.path)
+module_functions = codebase.functions_in_file(module.source_id)
 
 bas_files = codebase.find_source_files(extension=".bas")
 ```
 
-`source_files` is sorted by path. `functions_in_file()` returns complete immutable
+`source_files` is sorted by source identifier. `functions_in_file()` returns complete immutable
 `Function` objects sorted by function ID. An analyzed file with no functions returns an
-empty tuple. An unknown path raises `SourceFileNotFoundError`.
+empty tuple. An unknown source identifier raises `SourceFileNotFoundError`.
 
-`find_source_files()` supports `path_prefix`, `language`, and `extension` filters.
+`find_source_files()` supports `source_id_prefix`, `language`, and `extension` filters.
 
 ## Locate functions
 
@@ -101,32 +101,23 @@ callers = codebase.callers(function.id, transitive=True)
 when known, and resolution evidence. Cycles are handled safely and never return the
 starting function as its own dependency.
 
-## Manage entry points and context
+## Inspect entry points and dependency context
 
-Frontends may suggest entry points, but callers decide which suggestions are business
-entries:
+Language analyzers identify structural entry points. If the rule produces an unsuitable
+result, change the analyzer rule rather than maintaining a second confirmation state:
 
 ```python
-codebase.accept_entry_candidates()
-codebase.mark_entries(
-    lambda function: function.attributes.get("visibility") == "public",
-    kind="public_procedure",
-)
-codebase.set_entries(["vba:frmOrder:bSave_Click"], kind="form_event")
-
-context = codebase.context_for("vba:frmOrder:bSave_Click")
+context = codebase.dependency_context("vba:frmOrder:bSave_Click")
 for function in context.functions:
     print(function.id, function.source)
 ```
-
-Entries can be removed with `remove_entries(function_ids, kind=...)`.
 
 Use `ContextLimits` to bound context size:
 
 ```python
 from codegraph import ContextLimits
 
-context = codebase.context_for(
+context = codebase.dependency_context(
     "vba:frmOrder:bSave_Click",
     limits=ContextLimits(
         max_depth=8,
@@ -138,7 +129,7 @@ if context.truncated:
     print(context.truncation_reasons)
 ```
 
-## Add a language frontend
+## Add a language analyzer
 
-Implement `LanguageFrontend`, or inherit from `BaseFrontend` and provide language-specific
-function and call extraction. See [`frontend.md`](frontend.md).
+Implement `LanguageAnalyzer`, or inherit from `BaseAnalyzer` and provide language-specific
+function, call, and entry-point extraction. See [`frontend.md`](frontend.md).
