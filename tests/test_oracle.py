@@ -1,4 +1,4 @@
-from codegraph import Codebase, OraclePlsqlFrontend, SourceFile
+from codegraph import Codebase, OraclePlsqlAnalyzer, SourceFile
 
 
 def test_oracle_package_body_resolves_members_and_qualified_calls() -> None:
@@ -44,7 +44,7 @@ END audit_pkg;
 """.lstrip(),
             ),
         ],
-        [OraclePlsqlFrontend()],
+        [OraclePlsqlAnalyzer()],
     )
 
     assert [function.id for function in codebase.functions] == [
@@ -73,7 +73,7 @@ CREATE OR REPLACE PACKAGE BODY broken AS
 """.lstrip(),
             )
         ],
-        [OraclePlsqlFrontend()],
+        [OraclePlsqlAnalyzer()],
     )
 
     assert [diagnostic.code for diagnostic in codebase.diagnostics] == [

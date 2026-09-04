@@ -29,7 +29,7 @@ formatting.
 
 ## Value and source identifier conventions
 
-The model layer is the contract between the caller, the core, and frontends. Every
+The model layer is the contract between the caller, the core, and analyzers. Every
 attribute below is part of that contract; an implementation must not silently change
 its type or interpretation.
 
@@ -37,7 +37,7 @@ its type or interpretation.
 | --- | --- | --- | --- |
 | `SourceFile` | `source_id` | `str` | Stable workspace-relative source identifier. It is a logical locator, not a `Path`; callers must provide it in canonical project-relative POSIX form. |
 | `SourceFile` | `content` | `str` | Complete source text for the file, not a partial diff. |
-| `SourceFile` | `language` | `str \| None` | Optional language hint. When present, frontend routing uses it instead of the file extension. |
+| `SourceFile` | `language` | `str \| None` | Optional language hint. When present, analyzer routing uses it instead of the file extension. |
 | `ContextLimits` | `max_depth` | `int \| None` | Maximum dependency-edge depth; `None` means unbounded and non-negative values are valid. |
 | `ContextLimits` | `max_functions` | `int \| None` | Maximum number of functions in a context; `None` means unbounded and positive values are valid. |
 | `ContextLimits` | `max_source_chars` | `int \| None` | Maximum selected source characters; `None` means unbounded and non-negative values are valid. |
@@ -130,7 +130,7 @@ These interfaces are required by callers integrating CodeGraph.
 
 | Interface | Required? | Responsibility | Boundary rule |
 | --- | --- | --- | --- |
-| `Codebase.analyze(files, frontends)` | Yes | Build one dependency snapshot from complete source files | The only supported construction path |
+| `Codebase.analyze(files, analyzers)` | Yes | Build one dependency snapshot from complete source files | The only supported construction path |
 | `Codebase.source_files` | Yes | Enumerate the input snapshot | Returns deterministic immutable results |
 | `Codebase.source_file(source_id)` | Yes | Retrieve one known source file | Raises `SourceFileNotFoundError` for an unknown source identifier |
 | `Codebase.find_source_files(...)` | Yes | Filter source files by source identifier, language, or extension | Filtering only; no discovery or I/O |
@@ -181,8 +181,7 @@ metadata differs. It must remain descriptive metadata, not a second hidden contr
 
 Language analyzer authors have a separate interface from normal callers. “Frontend” is
 not used as the design term because it can be confused with a user-interface layer.
-Existing Python names may retain `Frontend` temporarily; renaming them is a separate
-compatibility change.
+The analyzer vocabulary is the only supported public terminology.
 
 ### Minimal protocol
 
@@ -197,8 +196,7 @@ analyzer owns syntax, language-specific name resolution, and entry-point rules.
 
 ### Template base class
 
-`BaseAnalyzer` is a convenience implementation, not a second core abstraction. The
-current `BaseFrontend` name is a compatibility name to be renamed separately. It
+`BaseAnalyzer` is a convenience implementation, not a second core abstraction. It
 provides:
 
 - `supports()` from `language_name` and `file_extensions`;

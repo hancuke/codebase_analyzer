@@ -7,7 +7,7 @@ from typing import Mapping
 
 @dataclass(frozen=True)
 class SourceFile:
-    path: str
+    source_id: str
     content: str
     language: str | None = None
 
@@ -31,7 +31,7 @@ class Function:
     name: str
     language: str
     module: str
-    file: str
+    source_id: str
     source: str
     source_range: SourceRange
     attributes: Mapping[str, object] = field(default_factory=dict)
@@ -58,16 +58,9 @@ class Diagnostic:
     code: str
     severity: str
     message: str
-    path: str | None = None
+    source_id: str | None = None
     function_id: str | None = None
     line: int | None = None
-
-
-@dataclass(frozen=True)
-class EntryCandidate:
-    function_id: str
-    kind: str
-    source: str = "frontend"
 
 
 @dataclass(frozen=True)
@@ -78,10 +71,10 @@ class EntryPoint:
 
 
 @dataclass(frozen=True)
-class FileAnalysis:
+class AnalysisResult:
     functions: tuple[Function, ...] = ()
     calls: tuple[Call, ...] = ()
-    entry_candidates: tuple[EntryCandidate, ...] = ()
+    entry_points: tuple[EntryPoint, ...] = ()
     diagnostics: tuple[Diagnostic, ...] = ()
 
 

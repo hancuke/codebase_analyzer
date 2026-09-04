@@ -36,12 +36,12 @@ remain stable when a function moves within a file.
 ### Build a snapshot
 
 ```python
-codebase = Codebase.analyze(files=files, frontends=[VbaFrontend()])
+codebase = Codebase.analyze(files=files, analyzers=[VbaAnalyzer()])
 for diagnostic in codebase.diagnostics:
     report(diagnostic)
 ```
 
-The analysis is deterministic. Files are routed to exactly one frontend, functions are
+The analysis is deterministic. Sources are routed to exactly one analyzer, functions are
 collected before calls are resolved, and reliable partial results remain available when
 other files have diagnostics.
 
@@ -78,7 +78,7 @@ downstream AI services should be implemented as separate adapters.
 ## Implementation checkpoint
 
 Before changing code, select one local problem from the API boundary agreement:
-construction safety, frontend fact validation, vocabulary reduction, resolution result
+construction safety, analyzer fact validation, vocabulary reduction, resolution result
 clarity, or internal facade decomposition. Do not combine these changes into one
 refactor.
 
@@ -88,4 +88,4 @@ refactor.
 2. Preserve unresolved facts and diagnostics instead of silently dropping them.
 3. Keep IDs, ordering, ranges, and diagnostic codes deterministic.
 4. Expose partial results explicitly so callers control blocking policy.
-5. Keep language-specific behavior inside the corresponding frontend.
+5. Keep language-specific behavior inside the corresponding analyzer.

@@ -1,18 +1,19 @@
 import pytest
 
 from codegraph import (
-    BaseFrontend,
+    BaseAnalyzer,
     Codebase,
     ContextLimits,
     Diagnostic,
-    FileAnalysis,
+    AnalysisResult,
     Function,
     FunctionNotFoundError,
+    EntryPoint,
     RawCall,
     SourceFile,
     SourceFileNotFoundError,
     SourceRange,
-    VbaFrontend,
+    VbaAnalyzer,
 )
 
 
@@ -44,7 +45,7 @@ End Function
 """.lstrip(),
             ),
         ],
-        [VbaFrontend()],
+        [VbaAnalyzer()],
     )
 
 
@@ -76,11 +77,10 @@ End Sub
 """.lstrip(),
             )
         ],
-        [VbaFrontend()],
+        [VbaAnalyzer()],
     )
 
-    codebase.accept_entry_candidates()
-    context = codebase.context_for("vba:frmOrder:bSave_Click")
+    context = codebase.dependency_context("vba:frmOrder:bSave_Click")
 
     assert context.entry.kind == "form_event"
     assert [item.id for item in context.functions] == ["vba:frmOrder:bSave_Click"]
@@ -104,7 +104,7 @@ End Sub
 """.lstrip(),
             )
         ],
-        [VbaFrontend()],
+        [VbaAnalyzer()],
     )
 
     assert [item.id for item in codebase.callees("vba:modCycle:First", transitive=True)] == [
@@ -120,7 +120,7 @@ def test_unknown_function_has_one_clear_error_type() -> None:
 def test_source_files_and_functions_can_be_queried_by_file() -> None:
     codebase = build_codebase()
 
-    assert [source_file.path for source_file in codebase.source_files] == [
+    assert [source_file.source_id for source_file in codebase.source_files] == [
         "frmOrder.frm",
         "modOrder.bas",
     ]
@@ -135,7 +135,7 @@ def test_source_files_and_functions_can_be_queried_by_file() -> None:
 def test_source_file_queries_distinguish_unknown_and_empty_files() -> None:
     codebase = Codebase.analyze(
         [SourceFile("empty.bas", "Option Explicit\n")],
-        [VbaFrontend()],
+        [VbaAnalyzer()],
     )
 
     assert codebase.functions_in_file("empty.bas") == ()
@@ -148,7 +148,7 @@ def test_source_file_queries_distinguish_unknown_and_empty_files() -> None:
 def test_file_and_function_filters_are_deterministic() -> None:
     codebase = build_codebase()
 
-    assert [item.path for item in codebase.find_source_files(extension=".BAS")] == [
+    assert [item.source_id for item in codebase.find_source_files(extension=".BAS")] == [
         "modOrder.bas"
     ]
     assert [item.id for item in codebase.find_functions(name="SaveOrder")] == [
@@ -175,7 +175,7 @@ End Sub
 """.lstrip(),
             )
         ],
-        [VbaFrontend()],
+        [VbaAnalyzer()],
     )
 
     assert [call.name for call in codebase.calls_from(
@@ -191,7 +191,7 @@ End Sub
 
 def test_context_limits_report_truncation() -> None:
     codebase = build_codebase()
-    context = codebase.context_for(
+    context = codebase.dependency_context(
         "vba:frmOrder:bSave_Click",
         limits=ContextLimits(max_depth=1, max_functions=2),
     )
@@ -201,37 +201,52 @@ def test_context_limits_report_truncation() -> None:
     assert len(context.functions) == 2
 
 
-def test_entries_can_be_removed_by_id_or_kind() -> None:
-    codebase = build_codebase()
-    codebase.accept_entry_candidates()
-    codebase.mark_entries(lambda function: function.name == "SaveOrder", kind="manual")
-
-    codebase.remove_entries(["vba:frmOrder:bSave_Click"])
-    assert [entry.function_id for entry in codebase.entry_points] == [
-        "vba:modOrder:SaveOrder"
-    ]
-    codebase.remove_entries(kind="manual")
-    assert codebase.entry_points == ()
-
-
-def test_files_require_exactly_one_frontend() -> None:
-    class CatchAllFrontend:
+def test_files_require_exactly_one_analyzer() -> None:
+    class CatchAllAnalyzer:
         def supports(self, file: SourceFile) -> bool:
             return True
 
-        def analyze(self, files: tuple[SourceFile, ...]) -> FileAnalysis:
-            return FileAnalysis()
+        def analyze(self, files: tuple[SourceFile, ...]) -> AnalysisResult:
+            return AnalysisResult()
 
     codebase = Codebase.analyze(
         [SourceFile("module.txt", "not VBA")],
-        [CatchAllFrontend(), CatchAllFrontend()],
+        [CatchAllAnalyzer(), CatchAllAnalyzer()],
     )
 
-    assert [item.code for item in codebase.diagnostics] == ["ambiguous_frontend"]
+    assert [item.code for item in codebase.diagnostics] == ["ambiguous_analyzer"]
 
 
-def test_base_frontend_pipeline_template() -> None:
-    class DummyPyFrontend(BaseFrontend):
+def test_duplicate_sources_and_invalid_entry_points_are_diagnosed() -> None:
+    class FactAnalyzer:
+        def supports(self, file: SourceFile) -> bool:
+            return True
+
+        def analyze(self, files: tuple[SourceFile, ...]) -> AnalysisResult:
+            return AnalysisResult(
+                entry_points=(
+                    EntryPoint(
+                        function_id="missing",
+                        kind="structural",
+                        source="analyzer",
+                    ),
+                )
+            )
+
+    codebase = Codebase.analyze(
+        [SourceFile("same.bas", ""), SourceFile("same.bas", "")],
+        [FactAnalyzer()],
+    )
+
+    assert codebase.entry_points == ()
+    assert [item.code for item in codebase.diagnostics] == [
+        "missing_entry_point",
+        "duplicate_source_id",
+    ]
+
+
+def test_base_analyzer_pipeline_template() -> None:
+    class DummyPyAnalyzer(BaseAnalyzer):
         language_name = "python"
         file_extensions = {".py"}
 
@@ -243,7 +258,7 @@ def test_base_frontend_pipeline_template() -> None:
                 name="run",
                 language="python",
                 module="main",
-                file=source_file.path,
+                source_id=source_file.source_id,
                 source="def run(): helper()",
                 source_range=SourceRange(1, 1),
             )
@@ -252,7 +267,7 @@ def test_base_frontend_pipeline_template() -> None:
                 name="helper",
                 language="python",
                 module="main",
-                file=source_file.path,
+                source_id=source_file.source_id,
                 source="def helper(): pass",
                 source_range=SourceRange(2, 2),
             )
@@ -265,7 +280,7 @@ def test_base_frontend_pipeline_template() -> None:
 
     codebase = Codebase.analyze(
         [SourceFile("main.py", "def run(): helper()\ndef helper(): pass")],
-        [DummyPyFrontend()],
+        [DummyPyAnalyzer()],
     )
 
     assert [item.id for item in codebase.callees("python:main:run")] == [
@@ -295,7 +310,7 @@ End Function
 """.lstrip(),
             )
         ],
-        [VbaFrontend()],
+        [VbaAnalyzer()],
     )
 
     calls = codebase.calls_from("vba:modCalls:Main")

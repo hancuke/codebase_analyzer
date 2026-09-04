@@ -6,13 +6,13 @@ validates, indexes, and queries the results.
 
 ## Recommended approach
 
-Inherit from `BaseAnalyzer` (the current compatibility name is `BaseFrontend`):
+Inherit from `BaseAnalyzer`:
 
 ```python
-from codegraph import BaseFrontend, Diagnostic, Function, RawCall, SourceFile
+from codegraph import BaseAnalyzer, Diagnostic, Function, RawCall, SourceFile
 
 
-class PythonFrontend(BaseFrontend):
+class PythonAnalyzer(BaseAnalyzer):
     language_name = "python"
     file_extensions = {".py"}
     is_case_sensitive = True

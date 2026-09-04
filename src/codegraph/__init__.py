@@ -1,37 +1,35 @@
 from .core import Codebase, FunctionNotFoundError, SourceFileNotFoundError
-from .frontend import BaseFrontend, LanguageFrontend, RawCall
+from .analyzer import BaseAnalyzer, LanguageAnalyzer, RawCall
 from .model import (
+    AnalysisResult,
     AnalysisContext,
     Call,
     ContextLimits,
     Diagnostic,
-    EntryCandidate,
     EntryPoint,
-    FileAnalysis,
     Function,
     SourceFile,
     SourceRange,
 )
-from .oracle import OraclePlsqlFrontend
-from .vba import VbaFrontend
+from .oracle import OraclePlsqlAnalyzer
+from .vba import VbaAnalyzer
 
 __all__ = [
     "AnalysisContext",
-    "BaseFrontend",
+    "AnalysisResult",
+    "BaseAnalyzer",
     "Call",
     "Codebase",
     "ContextLimits",
     "Diagnostic",
-    "EntryCandidate",
     "EntryPoint",
-    "FileAnalysis",
     "Function",
     "FunctionNotFoundError",
-    "LanguageFrontend",
+    "LanguageAnalyzer",
     "RawCall",
     "SourceFile",
     "SourceFileNotFoundError",
     "SourceRange",
-    "VbaFrontend",
-    "OraclePlsqlFrontend",
+    "VbaAnalyzer",
+    "OraclePlsqlAnalyzer",
 ]

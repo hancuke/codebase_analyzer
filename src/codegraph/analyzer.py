@@ -7,19 +7,19 @@ from typing import Mapping, Protocol, Sequence
 from .model import (
     Call,
     Diagnostic,
-    EntryCandidate,
-    FileAnalysis,
+    AnalysisResult,
+    EntryPoint,
     Function,
     SourceFile,
 )
 
 
-class LanguageFrontend(Protocol):
+class LanguageAnalyzer(Protocol):
     def supports(self, file: SourceFile) -> bool:
-        """Return whether this frontend owns the file."""
+        """Return whether this analyzer owns the source."""
 
-    def analyze(self, files: Sequence[SourceFile]) -> FileAnalysis:
-        """Analyze a batch of files supported by this frontend."""
+    def analyze(self, files: Sequence[SourceFile]) -> AnalysisResult:
+        """Analyze a batch of sources supported by this analyzer."""
 
 
 @dataclass(frozen=True)
@@ -31,17 +31,17 @@ class RawCall:
     context: Mapping[str, object] = field(default_factory=dict)
 
 
-class BaseFrontend:
-    """Template-based frontend base class enforcing a standard 5-step analysis pipeline.
+class BaseAnalyzer:
+    """Template-based analyzer base class enforcing a standard analysis pipeline.
 
-    New language frontends can inherit from this class to eliminate boilerplate code.
+    New language analyzers can inherit from this class to eliminate boilerplate code.
     Subclasses only need to implement:
       - language_name (e.g. "vba", "python", "java")
       - file_extensions (e.g. {".bas", ".cls", ".frm"})
       - extract_functions(source_file) -> (functions, diagnostics)
       - extract_raw_calls(function) -> list[RawCall]
       - (optional) is_case_sensitive: bool (default True)
-      - (optional) detect_entry_candidate(function) -> EntryCandidate | None
+      - (optional) detect_entry_point(function) -> EntryPoint | None
       - (optional) resolve_target(raw_call, source_function, symbol_index) -> str | None
     """
 
@@ -52,9 +52,9 @@ class BaseFrontend:
     def supports(self, file: SourceFile) -> bool:
         if file.language is not None:
             return file.language.casefold() == self.language_name.casefold()
-        if not file.path:
+        if not file.source_id:
             return False
-        ext = PurePath(file.path).suffix
+        ext = PurePath(file.source_id).suffix
         if not self.is_case_sensitive:
             ext = ext.casefold()
         valid_exts = (
@@ -67,7 +67,7 @@ class BaseFrontend:
     def normalize_name(self, name: str) -> str:
         return name if self.is_case_sensitive else name.casefold()
 
-    def analyze(self, files: Sequence[SourceFile]) -> FileAnalysis:
+    def analyze(self, files: Sequence[SourceFile]) -> AnalysisResult:
         all_functions: list[Function] = []
         all_diagnostics: list[Diagnostic] = []
 
@@ -83,15 +83,14 @@ class BaseFrontend:
             norm_name = self.normalize_name(function.name)
             symbol_index.setdefault(norm_name, []).append(function)
 
-        # Step 3, 4 & 5: Process each function for entry candidates and calls
+        # Process each function for entry points and calls.
         all_calls: list[Call] = []
-        all_candidates: list[EntryCandidate] = []
+        all_entry_points: list[EntryPoint] = []
 
         for function in all_functions:
-            # Step 5: Entry candidate detection
-            candidate = self.detect_entry_candidate(function)
-            if candidate is not None:
-                all_candidates.append(candidate)
+            entry_point = self.detect_entry_point(function)
+            if entry_point is not None:
+                all_entry_points.append(entry_point)
 
             # Step 3: Raw call extraction
             raw_calls = self.extract_raw_calls(function)
@@ -117,10 +116,10 @@ class BaseFrontend:
                     )
                 )
 
-        return FileAnalysis(
+        return AnalysisResult(
             functions=tuple(all_functions),
             calls=tuple(all_calls),
-            entry_candidates=tuple(all_candidates),
+            entry_points=tuple(all_entry_points),
             diagnostics=tuple(all_diagnostics),
         )
 
@@ -134,8 +133,8 @@ class BaseFrontend:
         """Extract un-resolved raw call sites from a function's source code."""
         raise NotImplementedError
 
-    def detect_entry_candidate(self, function: Function) -> EntryCandidate | None:
-        """Hook to detect if a function is a potential entry candidate."""
+    def detect_entry_point(self, function: Function) -> EntryPoint | None:
+        """Hook to detect a structural entry point."""
         return None
 
     def resolve_target(
@@ -186,9 +185,8 @@ class BaseFrontend:
             code="unresolved_call",
             severity="warning",
             message=f"Cannot resolve {lang_upper} call {raw_call.name!r}: {reason}.",
-            path=source_function.file,
+            source_id=source_function.source_id,
             function_id=source_function.id,
             line=raw_call.line,
         )
         return None, diag
-

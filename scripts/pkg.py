@@ -1,4 +1,4 @@
-from codegraph import Codebase, OraclePlsqlFrontend, SourceFile
+from codegraph import Codebase, OraclePlsqlAnalyzer, SourceFile
 
 codebase = Codebase.analyze(
     files=[
@@ -28,13 +28,13 @@ END  ;
 """,
         ),
     ],
-    frontends=[OraclePlsqlFrontend()],
+    analyzers=[OraclePlsqlAnalyzer()],
 )
 
 for source_file in codebase.source_files:
-    print(source_file.path)
-    for function in codebase.functions_in_file(source_file.path):
+    print(source_file.source_id)
+    for function in codebase.functions_in_file(source_file.source_id):
         print(function.id, function.source)
 
 module = codebase.source_file("order.pkb")
-module_functions = codebase.functions_in_file(module.path)
+module_functions = codebase.functions_in_file(module.source_id)

@@ -1,20 +1,21 @@
 from __future__ import annotations
 
 from collections import defaultdict, deque
-from typing import Callable, Iterable, Sequence
+from typing import Sequence
 
-from .frontend import LanguageFrontend
+from .analyzer import LanguageAnalyzer
 from .model import (
     AnalysisContext,
     Call,
     ContextLimits,
     Diagnostic,
-    EntryCandidate,
     EntryPoint,
-    FileAnalysis,
+    AnalysisResult,
     Function,
     SourceFile,
 )
+
+_CONSTRUCTION_TOKEN = object()
 
 
 class FunctionNotFoundError(KeyError):
@@ -22,7 +23,7 @@ class FunctionNotFoundError(KeyError):
 
 
 class SourceFileNotFoundError(KeyError):
-    """Raised when a source file path is not present in a codebase."""
+    """Raised when a source identifier is not present in a codebase."""
 
 
 class Codebase:
@@ -32,19 +33,24 @@ class Codebase:
         self,
         *,
         files: dict[str, SourceFile],
-        frontends: tuple[LanguageFrontend, ...],
+        analyzers: tuple[LanguageAnalyzer, ...],
         functions: dict[str, Function],
         calls: tuple[Call, ...],
-        entry_candidates: tuple[EntryCandidate, ...],
+        entry_points: tuple[EntryPoint, ...],
         diagnostics: tuple[Diagnostic, ...],
+        _token: object | None = None,
     ) -> None:
+        if _token is not _CONSTRUCTION_TOKEN:
+            raise TypeError("Use Codebase.analyze() to construct a codebase.")
         self._files = files
-        self._frontends = frontends
+        self._analyzers = analyzers
         self._functions = functions
         self._calls = calls
-        self._entry_candidates = entry_candidates
+        self._entries = {
+            (entry.function_id, entry.kind, entry.source): entry
+            for entry in entry_points
+        }
         self._diagnostics = diagnostics
-        self._entries: dict[tuple[str, str, str], EntryPoint] = {}
         self._forward: dict[str, tuple[str, ...]] = {}
         self._reverse: dict[str, tuple[str, ...]] = {}
         self._functions_by_file: dict[str, tuple[Function, ...]] = {}
@@ -54,62 +60,62 @@ class Codebase:
     def analyze(
         cls,
         files: Sequence[SourceFile],
-        frontends: Sequence[LanguageFrontend],
+        analyzers: Sequence[LanguageAnalyzer],
     ) -> Codebase:
         unique_files: dict[str, SourceFile] = {}
         diagnostics: list[Diagnostic] = []
         for source_file in files:
-            if source_file.path in unique_files:
+            if source_file.source_id in unique_files:
                 diagnostics.append(
                     Diagnostic(
-                        code="duplicate_file_path",
+                        code="duplicate_source_id",
                         severity="error",
-                        message=f"More than one input file uses {source_file.path!r}.",
-                        path=source_file.path,
+                        message=f"More than one input source uses {source_file.source_id!r}.",
+                        source_id=source_file.source_id,
                     )
                 )
                 continue
-            unique_files[source_file.path] = source_file
+            unique_files[source_file.source_id] = source_file
 
         batches: dict[int, list[SourceFile]] = defaultdict(list)
-        frontend_list = tuple(frontends)
+        analyzer_list = tuple(analyzers)
         for source_file in unique_files.values():
             supported = [
                 index
-                for index, frontend in enumerate(frontend_list)
-                if frontend.supports(source_file)
+                for index, analyzer in enumerate(analyzer_list)
+                if analyzer.supports(source_file)
             ]
             if not supported:
                 diagnostics.append(
                     Diagnostic(
                         code="unsupported_file",
                         severity="error",
-                        message=f"No frontend supports {source_file.path!r}.",
-                        path=source_file.path,
+                        message=f"No analyzer supports {source_file.source_id!r}.",
+                        source_id=source_file.source_id,
                     )
                 )
             elif len(supported) > 1:
                 diagnostics.append(
                     Diagnostic(
-                        code="ambiguous_frontend",
+                        code="ambiguous_analyzer",
                         severity="error",
-                        message=f"More than one frontend supports {source_file.path!r}.",
-                        path=source_file.path,
+                        message=f"More than one analyzer supports {source_file.source_id!r}.",
+                        source_id=source_file.source_id,
                     )
                 )
             else:
                 batches[supported[0]].append(source_file)
 
-        analyses: list[FileAnalysis] = []
+        analyses: list[AnalysisResult] = []
         for index, batch in sorted(batches.items()):
-            analyses.append(frontend_list[index].analyze(tuple(batch)))
+            analyses.append(analyzer_list[index].analyze(tuple(batch)))
 
         functions: dict[str, Function] = {}
         calls: list[Call] = []
-        candidates: list[EntryCandidate] = []
+        entry_points: list[EntryPoint] = []
         for analysis in analyses:
             diagnostics.extend(analysis.diagnostics)
-            candidates.extend(analysis.entry_candidates)
+            entry_points.extend(analysis.entry_points)
             for function in analysis.functions:
                 if function.id in functions:
                     diagnostics.append(
@@ -117,7 +123,7 @@ class Codebase:
                             code="duplicate_function_id",
                             severity="error",
                             message=f"More than one function uses {function.id!r}.",
-                            path=function.file,
+                            source_id=function.source_id,
                             function_id=function.id,
                             line=function.source_range.start_line,
                         )
@@ -154,9 +160,26 @@ class Codebase:
                 )
             valid_calls.append(call)
 
+        valid_entry_points: list[EntryPoint] = []
+        for entry in entry_points:
+            if entry.function_id not in functions:
+                diagnostics.append(
+                    Diagnostic(
+                        code="missing_entry_point",
+                        severity="error",
+                        message=(
+                            f"Entry point {entry.function_id!r} is not an indexed "
+                            "function."
+                        ),
+                        function_id=entry.function_id,
+                    )
+                )
+                continue
+            valid_entry_points.append(entry)
+
         return cls(
             files=unique_files,
-            frontends=frontend_list,
+            analyzers=analyzer_list,
             functions=functions,
             calls=tuple(
                 sorted(
@@ -169,36 +192,35 @@ class Codebase:
                     ),
                 )
             ),
-            entry_candidates=tuple(
+            entry_points=tuple(
                 sorted(
-                    candidates,
-                    key=lambda candidate: (
-                        candidate.function_id,
-                        candidate.kind,
-                        candidate.source,
+                    (
+                        entry for entry in valid_entry_points
                     ),
-                )
+                    key=lambda entry: (
+                        entry.function_id,
+                        entry.kind,
+                        entry.source,
+                    ),
+                ),
             ),
             diagnostics=tuple(
                 sorted(
                     diagnostics,
                     key=lambda diagnostic: (
-                        diagnostic.path or "",
+                        diagnostic.source_id or "",
                         diagnostic.line or 0,
                         diagnostic.code,
                         diagnostic.function_id or "",
                     ),
                 )
             ),
+            _token=_CONSTRUCTION_TOKEN,
         )
 
     @property
     def diagnostics(self) -> tuple[Diagnostic, ...]:
         return self._diagnostics
-
-    @property
-    def entry_candidates(self) -> tuple[EntryCandidate, ...]:
-        return self._entry_candidates
 
     @property
     def entry_points(self) -> tuple[EntryPoint, ...]:
@@ -220,7 +242,7 @@ class Codebase:
     def find_source_files(
         self,
         *,
-        path_prefix: str | None = None,
+        source_id_prefix: str | None = None,
         language: str | None = None,
         extension: str | None = None,
     ) -> tuple[SourceFile, ...]:
@@ -229,19 +251,22 @@ class Codebase:
         return tuple(
             source_file
             for source_file in self.source_files
-            if (path_prefix is None or source_file.path.startswith(path_prefix))
+            if (
+                source_id_prefix is None
+                or source_file.source_id.startswith(source_id_prefix)
+            )
             and (
                 normalized_language is None
                 or (source_file.language or "").casefold() == normalized_language
                 or (
                     source_file.language is None
-                    and source_file.path.rpartition(".")[2].casefold()
+                    and source_file.source_id.rpartition(".")[2].casefold()
                     == normalized_language.lstrip(".")
                 )
             )
             and (
                 normalized_extension is None
-                or source_file.path.casefold().endswith(
+                or source_file.source_id.casefold().endswith(
                     normalized_extension
                     if normalized_extension.startswith(".")
                     else "." + normalized_extension
@@ -249,22 +274,22 @@ class Codebase:
             )
         )
 
-    def source_file(self, path: str) -> SourceFile:
+    def source_file(self, source_id: str) -> SourceFile:
         try:
-            return self._files[str(path)]
+            return self._files[str(source_id)]
         except KeyError as error:
-            raise SourceFileNotFoundError(path) from error
+            raise SourceFileNotFoundError(source_id) from error
 
-    def functions_in_file(self, path: str) -> tuple[Function, ...]:
-        self.source_file(path)
-        return self._functions_by_file[str(path)]
+    def functions_in_file(self, source_id: str) -> tuple[Function, ...]:
+        self.source_file(source_id)
+        return self._functions_by_file[str(source_id)]
 
     def find_functions(
         self,
         *,
         name: str | None = None,
         qualified_name: str | None = None,
-        file: str | None = None,
+        source_id: str | None = None,
         language: str | None = None,
         module: str | None = None,
         attribute: tuple[str, object] | None = None,
@@ -277,7 +302,7 @@ class Codebase:
                 qualified_name is None
                 or function.qualified_name == qualified_name
             )
-            and (file is None or function.file == file)
+            and (source_id is None or function.source_id == source_id)
             and (language is None or function.language.casefold() == language.casefold())
             and (module is None or function.module == module)
             and (
@@ -286,10 +311,10 @@ class Codebase:
             )
         )
 
-    def functions_at(self, path: str, line: int) -> tuple[Function, ...]:
+    def functions_at(self, source_id: str, line: int) -> tuple[Function, ...]:
         return tuple(
             function
-            for function in self.functions_in_file(path)
+            for function in self.functions_in_file(source_id)
             if function.source_range.start_line <= line <= function.source_range.end_line
         )
 
@@ -341,50 +366,7 @@ class Codebase:
     def ancestors_of(self, function_id: str) -> tuple[Function, ...]:
         return self.callers(function_id, transitive=True)
 
-    def accept_entry_candidates(self, *, kind: str | None = None) -> None:
-        for candidate in self._entry_candidates:
-            self._add_entry(
-                candidate.function_id,
-                kind=kind or candidate.kind,
-                source=candidate.source,
-            )
-
-    def mark_entries(
-        self, predicate: Callable[[Function], bool], *, kind: str
-    ) -> None:
-        for function in self.functions:
-            if predicate(function):
-                self._add_entry(function.id, kind=kind, source="predicate")
-
-    def set_entries(self, function_ids: Iterable[str], *, kind: str) -> None:
-        self._entries.clear()
-        for function_id in function_ids:
-            self._add_entry(str(function_id), kind=kind, source="manual")
-
-    def remove_entries(
-        self, function_ids: Iterable[str] = (), *, kind: str | None = None
-    ) -> None:
-        ids = {str(function_id) for function_id in function_ids}
-        self._entries = {
-            key: entry
-            for key, entry in self._entries.items()
-            if (ids and entry.function_id not in ids)
-            or (not ids and kind is not None and entry.kind != kind)
-            or (not ids and kind is None)
-        }
-
-    def mark_hinted_entry_points(self) -> None:
-        self.accept_entry_candidates()
-
-    def mark_entry_points(
-        self, predicate: Callable[[Function], bool], *, kind: str
-    ) -> None:
-        self.mark_entries(predicate, kind=kind)
-
-    def set_entry_points(self, function_ids: Iterable[str], *, kind: str) -> None:
-        self.set_entries(function_ids, kind=kind)
-
-    def context_for(
+    def dependency_context(
         self, entry_id: str, *, limits: ContextLimits | None = None
     ) -> AnalysisContext:
         self.function(entry_id)
@@ -397,7 +379,7 @@ class Codebase:
             raise ValueError("max_source_chars must be non-negative")
         entry = next(
             (item for item in self.entry_points if item.function_id == entry_id),
-            EntryPoint(function_id=entry_id, kind="unconfirmed", source="query"),
+            EntryPoint(function_id=entry_id, kind="root", source="query"),
         )
         paths = self._paths_from(entry_id, max_depth=limits.max_depth)
         reachable = tuple(path[-1] for path in paths)
@@ -445,7 +427,7 @@ class Codebase:
             path: [] for path in self._files
         }
         for function in self._functions.values():
-            functions_by_file.setdefault(function.file, []).append(function)
+            functions_by_file.setdefault(function.source_id, []).append(function)
         self._functions_by_file = {
             path: tuple(sorted(functions, key=lambda function: function.id))
             for path, functions in functions_by_file.items()
@@ -509,8 +491,3 @@ class Codebase:
                     paths[target_id] = (*paths[source_id], target_id)
                     pending.append(target_id)
         return tuple(paths[function_id] for function_id in sorted(paths))
-
-    def _add_entry(self, function_id: str, *, kind: str, source: str) -> None:
-        self.function(function_id)
-        entry = EntryPoint(function_id=function_id, kind=kind, source=source)
-        self._entries[(function_id, kind, source)] = entry

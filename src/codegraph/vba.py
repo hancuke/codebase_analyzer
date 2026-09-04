@@ -6,10 +6,10 @@ from pathlib import PurePath
 from pygments.lexers import get_lexer_by_name
 from pygments.token import Comment, Name, String, Text
 
-from .frontend import BaseFrontend, RawCall
+from .analyzer import BaseAnalyzer, RawCall
 from .model import (
     Diagnostic,
-    EntryCandidate,
+    EntryPoint,
     Function,
     SourceFile,
     SourceRange,
@@ -44,8 +44,8 @@ _CONTROL_WORDS = {
 }
 
 
-class VbaFrontend(BaseFrontend):
-    """A VBA frontend built on the standard BaseFrontend pipeline."""
+class VbaAnalyzer(BaseAnalyzer):
+    """A VBA analyzer built on the standard BaseAnalyzer pipeline."""
 
     language_name = "vba"
     file_extensions = {".bas", ".cls", ".frm"}
@@ -80,7 +80,7 @@ class VbaFrontend(BaseFrontend):
                     code="unterminated_procedure",
                     severity="error",
                     message="VBA procedure has no matching End Sub or End Function.",
-                    path=source_file.path,
+                    source_id=source_file.source_id,
                     line=start + 1,
                 )
             )
@@ -91,7 +91,7 @@ class VbaFrontend(BaseFrontend):
 
         Pygments handles comments and strings as separate token types. This
         method only applies lightweight call-position rules; name resolution
-        remains the responsibility of BaseFrontend.
+        remains the responsibility of BaseAnalyzer.
         """
         calls: list[RawCall] = []
         lexer = get_lexer_by_name("vb.net")
@@ -148,9 +148,11 @@ class VbaFrontend(BaseFrontend):
             calls.append(RawCall(name=value, line=line))
         return calls
 
-    def detect_entry_candidate(self, function: Function) -> EntryCandidate | None:
+    def detect_entry_point(self, function: Function) -> EntryPoint | None:
         if function.name.casefold().endswith("_click"):
-            return EntryCandidate(function_id=function.id, kind="form_event")
+            return EntryPoint(
+                function_id=function.id, kind="form_event", source="analyzer"
+            )
         return None
 
     @staticmethod
@@ -161,7 +163,7 @@ class VbaFrontend(BaseFrontend):
         end: int,
         match: re.Match[str],
     ) -> Function:
-        module = PurePath(source_file.path).stem
+        module = PurePath(source_file.source_id).stem
         name = match.group(2)
         visibility = (match.group(1) or "public").casefold()
         return Function(
@@ -169,7 +171,7 @@ class VbaFrontend(BaseFrontend):
             name=name,
             language="vba",
             module=module,
-            file=source_file.path,
+            source_id=source_file.source_id,
             source="".join(lines[start : end + 1]),
             source_range=SourceRange(start_line=start + 1, end_line=end + 1),
             attributes={"visibility": visibility},

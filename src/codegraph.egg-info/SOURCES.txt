@@ -1,7 +1,7 @@
 pyproject.toml
 src/codegraph/__init__.py
 src/codegraph/core.py
-src/codegraph/frontend.py
+src/codegraph/analyzer.py
 src/codegraph/model.py
 src/codegraph/vba.py
 src/codegraph.egg-info/PKG-INFO

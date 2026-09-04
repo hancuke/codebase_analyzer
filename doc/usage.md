@@ -10,7 +10,7 @@ discovery and downstream reporting remain the caller's responsibility.
 ## Analyze a codebase
 
 ```python
-from codegraph import Codebase, SourceFile, VbaFrontend
+from codegraph import Codebase, SourceFile, VbaAnalyzer
 
 codebase = Codebase.analyze(
     files=[
@@ -33,12 +33,12 @@ Public Function LoadCustomer() As Boolean
 End Function
 """.lstrip()),
     ],
-    frontends=[VbaFrontend()],
+    analyzers=[VbaAnalyzer()],
 )
 ```
 
 Each file must be supported by exactly one analyzer. Unsupported files, ambiguous
-frontend ownership, duplicate source identifiers, parse problems, and unresolved calls are reported
+analyzer ownership, duplicate source identifiers, parse problems, and unresolved calls are reported
 through `codebase.diagnostics`. Reliable results from other files remain available.
 
 ## Inspect diagnostics
@@ -132,4 +132,4 @@ if context.truncated:
 ## Add a language analyzer
 
 Implement `LanguageAnalyzer`, or inherit from `BaseAnalyzer` and provide language-specific
-function, call, and entry-point extraction. See [`frontend.md`](frontend.md).
+function, call, and entry-point extraction. See [`analyzer.md`](analyzer.md).

@@ -7,8 +7,8 @@ from typing import Sequence
 from pygments.lexers import get_lexer_by_name
 from pygments.token import Comment, Name, String, Text
 
-from .frontend import BaseFrontend, RawCall
-from .model import Diagnostic, Function, SourceFile, SourceRange
+from .analyzer import BaseAnalyzer, RawCall
+from .model import AnalysisResult, Diagnostic, Function, SourceFile, SourceRange
 
 
 _PACKAGE = re.compile(
@@ -33,7 +33,7 @@ _CONTROL_WORDS = {
 }
 
 
-class OraclePlsqlFrontend(BaseFrontend):
+class OraclePlsqlAnalyzer(BaseAnalyzer):
     """Parser for Oracle PL/SQL package members and their direct calls."""
 
     language_name = "plsql"
@@ -43,7 +43,7 @@ class OraclePlsqlFrontend(BaseFrontend):
     def __init__(self) -> None:
         self._functions: tuple[Function, ...] = ()
 
-    def analyze(self, files: Sequence[SourceFile]) -> "FileAnalysis":
+    def analyze(self, files: Sequence[SourceFile]) -> AnalysisResult:
         body_packages = {
             match.group(2).casefold()
             for source_file in files
@@ -80,7 +80,7 @@ class OraclePlsqlFrontend(BaseFrontend):
                     code="parse_error",
                     severity="error",
                     message="PL/SQL package declaration was not found.",
-                    path=source_file.path,
+                    source_id=source_file.source_id,
                 )
             ]
 
@@ -124,7 +124,7 @@ class OraclePlsqlFrontend(BaseFrontend):
                         code="unterminated_procedure",
                         severity="error",
                         message=f"PL/SQL package member {name!r} has no matching END.",
-                        path=source_file.path,
+                        source_id=source_file.source_id,
                         line=index + 1,
                     )
                 )
@@ -275,7 +275,7 @@ class OraclePlsqlFrontend(BaseFrontend):
             name=name,
             language="plsql",
             module=package,
-            file=source_file.path,
+            source_id=source_file.source_id,
             source=source,
             source_range=SourceRange(start_line=start + 1, end_line=end + 1),
             attributes={
@@ -283,6 +283,6 @@ class OraclePlsqlFrontend(BaseFrontend):
                 "package": package,
                 "body": is_body,
                 "declaration_only": not is_body,
-                "path": PurePath(source_file.path).suffix.casefold(),
+                "path": PurePath(source_file.source_id).suffix.casefold(),
             },
         )

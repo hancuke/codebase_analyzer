@@ -33,11 +33,11 @@ are duplicates. `content` is complete source text, not a diff. `language` is an 
 `str` hint that may override extension-based analyzer routing.
 
 Core object attributes, types, invariants, and the flow from `SourceFile` through
-`FileAnalysis` to `Codebase` and `AnalysisContext` are defined in
+`AnalysisResult` to `Codebase` and `AnalysisContext` are defined in
 [`api-boundary.md`](api-boundary.md).
 
 Every file must have exactly one supporting analyzer. Zero supporters produce
-`unsupported_file`; multiple supporters produce `ambiguous_frontend`.
+`unsupported_file`; multiple supporters produce `ambiguous_analyzer`.
 
 ## Domain models
 
@@ -46,7 +46,7 @@ Every file must have exactly one supporting analyzer. Zero supporters produce
 An analyzer must provide:
 
 - a stable, codebase-unique `id`;
-- `name`, `language`, `module`, and source `file`;
+- `name`, `language`, `module`, and source `source_id`;
 - the original function `source`;
 - a one-based inclusive `SourceRange`;
 - optional serializable `attributes`.
@@ -80,10 +80,10 @@ unexpected programming errors must not be converted into successful empty result
   `find_functions()`, `functions_at()`;
 - `calls_from()`, `calls_to()`;
 - `callees()`, `callers()`, and their transitive variants;
-- entry candidate acceptance, entry marking, replacement, removal, and enumeration;
+- analyzer-provided entry-point enumeration;
 - bounded `dependency_context()`;
 
-Queries are read-only except for explicit entry management. Results
+Queries are read-only. Results
 are immutable and deterministically ordered.
 
 ## Context limits
