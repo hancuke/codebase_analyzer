@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "document-updater"
+version = "0.1.0"
+description = "Plan entry-oriented documentation updates from code impact analysis."
+requires-python = ">=3.10"
+dependencies = [
+    "change-analyzer",
+    "codegraph",
+]
+
+[tool.uv.sources]
+change-analyzer = { workspace = true }
+codegraph = { workspace = true }
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

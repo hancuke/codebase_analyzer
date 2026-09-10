@@ -1,0 +1,12 @@
+[tool.uv.workspace]
+members = [
+    "code_graph",
+    "file_tracker",
+    "change_analyzer",
+    "document_updater",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0",
+]

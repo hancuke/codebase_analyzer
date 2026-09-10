@@ -1,11 +1,13 @@
-# Copilot instructions for CodeGraph
+# Copilot instructions for the CodeGraph workspace
 
 ## Project overview
 
-CodeGraph is a small, language-independent static-analysis library. It builds one
-immutable dependency snapshot from caller-provided complete source files and language
-analyzers. It does not discover files, read from disk, execute code, expose parser ASTs,
-link dependencies across languages, or generate reports/prompts.
+This repository is a `uv` workspace containing four packages:
+
+- `code_graph/`: language-independent static analysis and dependency queries.
+- `file_tracker/`: immutable physical file changes and baseline transactions.
+- `change_analyzer/`: old/new CodeGraph comparison and entry-impact analysis.
+- `document_updater/`: entry-oriented document plans and LLM-ready contexts.
 
 The main flow is:
 
@@ -24,11 +26,10 @@ queries. An analyzer owns syntax parsing, language-specific name resolution, cal
 extraction, entry-point rules, and language diagnostics. Analyzers may receive a batch of
 same-language files so forward and cross-file references can be resolved.
 
-The stable model is in `src/codegraph/model.py`; the facade and graph algorithms are in
-`src/codegraph/core.py`; analyzer extension points are in `src/codegraph/analyzer.py`;
-language implementations are in `src/codegraph/vba.py` and
-`src/codegraph/oracle.py`. The design contract and API decisions are documented in
-`doc/architecture.md`, `doc/api-boundary.md`, `doc/spec.md`, and `doc/analyzer.md`.
+The stable CodeGraph model is in `code_graph/src/codegraph/model.py`; the facade and
+graph algorithms are in `code_graph/src/codegraph/core.py`; analyzer extension points
+are in `code_graph/src/codegraph/analyzer.py`; language implementations are in
+`code_graph/src/codegraph/vba.py` and `code_graph/src/codegraph/oracle.py`.
 
 ## Build, test, and lint commands
 
@@ -36,21 +37,25 @@ Dependencies are managed with `uv` and the project requires Python 3.10 or newer
 
 ```bash
 # Install/synchronize the development environment
-uv sync
+uv sync --all-packages
 
 # Run the complete test suite
-uv run pytest
+uv run pytest code_graph/tests file_tracker/tests change_analyzer/tests document_updater/tests
 
 # Run one test
-uv run pytest tests/test_codebase.py::test_vba_analysis_resolves_cross_file_and_forward_calls
+uv run pytest code_graph/tests/test_codebase.py::test_vba_analysis_resolves_cross_file_and_forward_calls
 
 # Run one test module
-uv run pytest tests/test_oracle.py
+uv run pytest change_analyzer/tests/test_change_analyzer.py
+
+# Run the end-to-end MVP example
+uv run python examples/entry_document_update.py
+
+# Build all workspace packages
+uv build --all-packages
 ```
 
-There is no configured lint command or lint tool in `pyproject.toml`. The project has a
-standard setuptools build configuration; use `uv build` when a package artifact needs to
-be produced.
+There is no configured lint command or lint tool.
 
 ## Repository-specific conventions
 
@@ -86,11 +91,20 @@ be produced.
 - Do not add filesystem traversal, Git/change tracking, cross-language linking, CLI/UI,
   serialization, AST exposure, execution, or AI/RAG orchestration to the core package.
   Put those concerns in caller adapters.
+- Keep workspace responsibilities one-directional: `change_analyzer` may compose
+  FileTracker and CodeGraph; `document_updater` may consume change-analysis results.
+  Do not make either core package depend on these orchestration packages.
+- Entry impact is computed from the union of reverse reachability in the baseline and
+  working graphs. This is required to preserve deleted dependencies and discover new ones.
+- A changed function may affect multiple entries. Keep the relationship many-to-many,
+  retain old/new path evidence, and preserve changes with no reachable entry as
+  `unassigned_changes`.
+- Documentation planning is deterministic. LLM calls receive one entry plan at a time;
+  they do not infer entry ownership from a repository-wide diff.
 
 ## Tests and examples
 
-Tests live in `tests/` and cover both public query behavior and analyzer pipelines.
+Tests live under each workspace package and cover public behavior and analyzer pipelines.
 When changing a public model, routing rule, graph query, or analyzer contract, update
-the relevant tests and examples together. The executable examples in `scripts/main.py`
-and `scripts/pkg.py` demonstrate the VBA and Oracle PL/SQL workflows.
-
+the relevant tests and examples together. `examples/entry_document_update.py`
+demonstrates the end-to-end incremental documentation MVP.
