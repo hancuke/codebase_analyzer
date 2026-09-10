@@ -1,0 +1,10 @@
+.codebuddy
+
+# Python bytecode / caches
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Local baseline data produced by FileTracker
+.filetracker/
