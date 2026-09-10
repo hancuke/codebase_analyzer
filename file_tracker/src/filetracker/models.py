@@ -16,7 +16,7 @@ class ChangeStatus(Enum):
 
 
 class ContentAvailability(Enum):
-    """Reason a file version is or is not available as UTF-8 text."""
+    """Reason a file version is or is not available as decoded text."""
 
     ABSENT = "absent"
     TEXT = "text"

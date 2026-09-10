@@ -29,6 +29,31 @@ def is_binary(data: bytes) -> bool:
         idx += 1
 
 
+def decode_text(data: bytes) -> str | None:
+    """Decode supported text encodings without mistaking UTF-16 for binary.
+
+    UTF-16 text commonly contains NUL bytes, so it must be decoded before the
+    generic binary heuristic is applied.  A BOM is required for non-UTF-8
+    encodings to avoid classifying arbitrary binary data as source text.
+    """
+    if data.startswith((b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff")):
+        try:
+            return data.decode("utf-32")
+        except UnicodeDecodeError:
+            return None
+    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        try:
+            return data.decode("utf-16")
+        except UnicodeDecodeError:
+            return None
+    if is_binary(data):
+        return None
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
 def unified_diff(
     old_text: str,
     new_text: str,

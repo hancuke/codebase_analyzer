@@ -7,6 +7,7 @@ import os
 import pytest
 
 from filetracker.baseline import BaselineError, BaselineManager
+from filetracker.models import ContentAvailability
 
 
 def _manifest(content: str, revision: str) -> dict:
@@ -89,3 +90,15 @@ def test_linked_snapshots_restore_multiple_revisions(tmp_path):
     assert restored is not None
     assert restored["files"]["a.py"]["content"] == "v1"
     assert baseline.undo() is None
+
+
+def test_utf16_object_is_read_as_text(tmp_path):
+    baseline = BaselineManager(str(tmp_path))
+    data = "Begin Form\nEnd\n".encode("utf-16")
+    key = baseline.store_object(data)
+    manifest = {"version": 1, "revision": "r1", "files": {"form.frm": {"sha256": key}}}
+
+    snapshot = baseline.get_content_snapshot(manifest, "form.frm")
+
+    assert snapshot.availability is ContentAvailability.TEXT
+    assert snapshot.text == "Begin Form\nEnd\n"

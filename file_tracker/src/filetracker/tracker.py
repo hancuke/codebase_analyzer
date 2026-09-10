@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from filetracker.baseline import BaselineManager
-from filetracker.diff import is_binary
+from filetracker.diff import decode_text, is_binary
 from filetracker.models import (
     ChangeSet,
     ChangeStatus,
@@ -33,12 +33,12 @@ def _read_content_snapshot(abs_path: Path) -> ContentSnapshot:
             data = fh.read()
     except OSError:
         return ContentSnapshot(ContentAvailability.UNREADABLE)
+    text = decode_text(data)
+    if text is not None:
+        return ContentSnapshot(ContentAvailability.TEXT, text)
     if is_binary(data):
         return ContentSnapshot(ContentAvailability.BINARY)
-    try:
-        return ContentSnapshot(ContentAvailability.TEXT, data.decode("utf-8"))
-    except UnicodeDecodeError:
-        return ContentSnapshot(ContentAvailability.UNDECODABLE)
+    return ContentSnapshot(ContentAvailability.UNDECODABLE)
 
 
 def _read_bytes(abs_path: Path) -> bytes | None:

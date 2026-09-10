@@ -67,6 +67,17 @@ def test_binary_content_is_explicitly_classified(tmp_path):
     assert change.diff() == ""
 
 
+def test_utf16_text_with_bom_is_not_classified_as_binary(tmp_path):
+    path = tmp_path / "form.frm"
+    path.write_bytes("Private Sub Save_Click()\nEnd Sub\n".encode("utf-16"))
+    tracker = FileTracker(root=str(tmp_path))
+
+    change = tracker.scan().files[0]
+
+    assert change.working_content.availability is ContentAvailability.TEXT
+    assert change.working_content.text == "Private Sub Save_Click()\nEnd Sub\n"
+
+
 def test_commit_rejects_a_stale_scan_revision(tmp_path):
     _write(tmp_path, "a.py", "v1")
     tracker = FileTracker(root=str(tmp_path))

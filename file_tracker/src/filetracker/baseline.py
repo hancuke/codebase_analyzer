@@ -25,7 +25,7 @@ import tempfile
 import uuid
 from pathlib import Path
 
-from filetracker.diff import is_binary
+from filetracker.diff import decode_text, is_binary
 from filetracker.models import ContentAvailability, ContentSnapshot
 
 MANIFEST_FILENAME = "manifest.json"
@@ -151,12 +151,12 @@ class BaselineManager:
                 if isinstance(legacy_content, str):
                     return ContentSnapshot(ContentAvailability.TEXT, legacy_content)
                 return ContentSnapshot(ContentAvailability.UNREADABLE)
+            text = decode_text(data)
+            if text is not None:
+                return ContentSnapshot(ContentAvailability.TEXT, text)
             if is_binary(data):
                 return ContentSnapshot(ContentAvailability.BINARY)
-            try:
-                return ContentSnapshot(ContentAvailability.TEXT, data.decode("utf-8"))
-            except UnicodeDecodeError:
-                return ContentSnapshot(ContentAvailability.UNDECODABLE)
+            return ContentSnapshot(ContentAvailability.UNDECODABLE)
         # Backward-compat: legacy manifests stored text inline.
         content = entry.get("content")
         if isinstance(content, str):
