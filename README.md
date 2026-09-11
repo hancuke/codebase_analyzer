@@ -6,7 +6,7 @@
 1. 跟踪代码文件相对于 baseline 的变化；
 2. 分析完整代码快照中的函数、调用关系和入口；
 3. 判断一次代码变更影响了哪些入口；
-4. 根据入口—文档覆盖关系，为每个受影响文档生成独立的更新计划；
+4. 为每个受影响入口生成独立的更新计划；
 5. 构建可以交给 LLM 的单文档更新上下文。
 
 当前示例主要使用 Microsoft Access VBA：
@@ -28,7 +28,7 @@ FileTracker ChangeSet
 | `code_graph/` | 从完整源码快照提取函数、调用关系、入口和 diagnostics，并提供依赖图查询 |
 | `file_tracker/` | 扫描物理文件变化，保存 baseline，提供不可变的文件内容快照和 revision 校验 |
 | `change_analyzer/` | 比较旧、新 CodeGraph，将函数和调用边变化映射到受影响入口 |
-| `document_updater/` | 维护入口到文档的覆盖关系，将入口影响转换成文档动作，并构建 LLM 文档更新上下文 |
+| `document_updater/` | 将单个入口影响转换成更新动作，并构建 LLM reference data |
 
 依赖方向保持单向：
 
@@ -42,6 +42,10 @@ filetracker       codegraph
 
 `codegraph` 不读取文件系统，`filetracker` 不理解调用图，文档和 LLM 逻辑也不会进入这两个
 核心包。
+
+文档系统的完整生命周期、路径映射和元数据约定见
+[`docs/document-lifecycle.md`](docs/document-lifecycle.md)；领域对象与包边界见
+[`docs/document-domain-model.md`](docs/document-domain-model.md)。
 
 ## Requirements
 
@@ -229,7 +233,7 @@ for batch in cluster_impacts(report):
 | `new_codebase` | working 完整代码图 |
 | `function_changes` | added、modified、deleted 函数 |
 | `call_edge_changes` | resolved 调用边的新增和删除 |
-| `entry_impacts` | 每个入口的变化证据和旧、新路径；随后按文档 coverage 聚合 |
+| `entry_impacts` | 每个入口的变化证据和旧、新路径 |
 | `unassigned_changes` | 没有任何可达入口的函数变化 |
 | `snapshot_issues` | 无法加入某一侧源码快照的文件 |
 
@@ -243,60 +247,36 @@ working 中能够到达变化函数的入口
 
 因此删除的函数和调用关系不会因只存在于旧图而被漏掉，新增加的关系也可以从新图发现。
 
-### 4. Register document coverage and create plans
+### 4. Create one plan per affected entry
 
-文档不是强制“一入口一文件”。版本控制的 `DocumentCatalog` 声明一份文档覆盖哪些入口；同一个
-Access Form 的多个事件入口可归入同一份文档。完整领域模型见
-[`docs/document-domain-model.md`](docs/document-domain-model.md)。
+每个受影响 `entry_id` 都会生成一个独立计划，因此每次 LLM 分析只看到一个入口的证据和上下文。
+LLM 返回结果后，文档同步层再按入口所属的 `source_id` 聚合：同一源文件的所有入口写入同一个
+`docs/<source path>.md`，每个入口由稳定的 HTML 注释标记包围。完整模型见
+[`docs/document-lifecycle.md`](docs/document-lifecycle.md)。
 
 ```python
-from document_updater import DocumentCatalog, create_document_plans
+from document_updater import create_entry_plans
 
-catalog = DocumentCatalog.load("docs/document-registry.json")
-plans = create_document_plans(
-    report,
-    document_registry=catalog,
-)
+plans = create_entry_plans(report)
 
 for plan in plans:
-    print(plan.action.value, plan.entry_id, plan.document_path)
+    print(plan.action.value, plan.entry_id)
 ```
 
 支持的文档动作：
 
 | Action | Meaning |
 | --- | --- |
-| `create` | 新入口，需要创建文档 |
+| `create` | 新入口，需要由调用方创建或更新对应文档 |
 | `update` | 入口仍存在，但相关代码发生变化 |
 | `archive` | 入口已删除，文档应归档或由调用方决定如何处理 |
 | `review` | 分析包含 error diagnostic，不应直接自动发布 |
 
-清单的最小格式如下：
-
-```json
-{
-  "version": 1,
-  "documents": [
-    {
-      "path": "docs/forms/order.md",
-      "entry_ids": [
-        "vba:frmOrder:bCancel_Click",
-        "vba:frmOrder:bSave_Click"
-      ]
-    }
-  ]
-}
-```
-
-清单未登记的入口保持兼容，默认文档路径类似：
-
-```text
-docs/entries/vba/frmOrder/bSave_Click.md
-```
-
-### 5. Build an LLM context
+### 5. Build reference data and render a prompt template
 
 ```python
+from pathlib import Path
+
 from document_updater import build_llm_context
 
 context = build_llm_context(
@@ -304,12 +284,18 @@ context = build_llm_context(
     old_document="# Existing entry document\n",
 )
 
-prompt = context.to_prompt()
+reference_data = context.to_reference_data_xml()
+template = Path("prompts/update-document.md").read_text(encoding="utf-8")
+prompt = template.replace("{{ reference_data }}", reference_data)
 ```
 
-生成的上下文包括：
+`document_updater` 只生成 XML 格式、确定性的 reference data，不内置 instructions、读取 Markdown
+文件或替换模板变量。调用方拥有提示词策略和 LLM 调用；Markdown 模板使用
+`{{ reference_data }}` 占位符引入上述 XML。
 
-- 文档动作和目标路径；
+reference data 包括：
+
+- 单个入口 ID 与更新动作；
 - 旧文档；
 - 与该入口有关的函数 diff；
 - 调用边变化；
@@ -318,13 +304,53 @@ prompt = context.to_prompt()
 - working entry dependency context；
 - 相关 diagnostics。
 
-LLM 每次只处理一个文档计划；计划会包含该文档内每个受影响入口的独立证据和上下文，不需要从整个
-repository diff 中猜测入口归属。
+LLM 每次只处理一个入口计划，不需要从整个 repository diff 中猜测入口归属。若多个入口对应同一份
+物理文档，传给 LLM 的 `old_document` 应通过 `extract_entry_document()` 从共享文档中提取，
+避免把其他入口的内容混入当前请求。
 
-### 6. Advance the baseline after publishing
+### 6. Merge entry results into source documents
 
-当前 MVP 不负责调用 LLM 或发布文档。调用方应先生成、验证并发布全部目标文档，最后才
-推进 FileTracker baseline：
+```python
+from document_updater import (
+    DocumentAction,
+    EntryDocumentResult,
+    LocalDocumentStore,
+    build_document_sync_plan,
+    resolve_document_targets,
+)
+
+store = LocalDocumentStore(project_root)
+targets = resolve_document_targets(plans)
+existing_documents = store.load(targets)
+results = tuple(
+    EntryDocumentResult(plan.entry_id, call_llm(plan))
+    for plan in plans
+    if plan.action in {DocumentAction.CREATE, DocumentAction.UPDATE}
+)
+sync_plan = build_document_sync_plan(
+    plans,
+    results,
+    existing_documents,
+)
+store.apply(sync_plan)
+```
+
+同步动作按 entry 严格执行：
+
+| Plan action | Shared document behavior |
+| --- | --- |
+| `create` | 插入新的受管 entry 区块；区块已存在则报错 |
+| `update` | 只替换对应 entry 区块；区块缺失则报错 |
+| `archive` | 删除对应 entry 区块；最后一个区块删除后删除空文档 |
+| `review` | 不修改正式文档，将 LLM 结果保存到 `.codegraph-reviews/` |
+
+LLM 结果不能包含 `<!-- codegraph:... -->` 保留标记。合并器会先校验全部结果和文档结构，
+再生成每个物理文档最多一个最终 write/delete mutation，避免同一源文件的多个 plan 相互覆盖。
+
+### 7. Advance the baseline after publishing
+
+当前实现不负责调用 LLM；`LocalDocumentStore` 可发布本地文档，其他存储目标可消费同一个
+`DocumentSyncPlan`。调用方应先生成、验证并发布全部目标文档，最后才推进 FileTracker baseline：
 
 ```python
 file_tracker.commit(

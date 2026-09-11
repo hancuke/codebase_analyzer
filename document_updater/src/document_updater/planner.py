@@ -1,55 +1,37 @@
 from __future__ import annotations
 
-import re
-from collections import defaultdict
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 
 from change_analyzer import CallEdgeChange, EntryImpact, ImpactReport
 from codegraph import AnalysisContext, Codebase, Diagnostic
 
-from .catalog import DocumentCatalog
 from .models import (
     DocumentAction,
-    DocumentEntryImpact,
-    EntryDocumentPlan,
-    LlmDocumentContext,
+    EntryImpactContext,
+    EntryUpdatePlan,
+    LlmEntryContext,
 )
 
 
-def create_document_plans(
+def create_entry_plans(
     report: ImpactReport,
-    document_registry: DocumentCatalog | Mapping[str, str] | None = None,
-) -> tuple[EntryDocumentPlan, ...]:
-    catalog = _catalog_or_empty(document_registry)
+) -> tuple[EntryUpdatePlan, ...]:
     function_changes = {
         change.function_id: change for change in report.function_changes
     }
-    plans: list[EntryDocumentPlan] = []
-    impacts_by_path: dict[str, list[EntryImpact]] = defaultdict(list)
-    for impact in report.entry_impacts:
-        document_path = (
-            catalog.document_path_for(impact.entry_id)
-            or _default_document_path(impact.entry_id)
-        )
-        impacts_by_path[document_path].append(impact)
-
-    for document_path, impacts in sorted(impacts_by_path.items()):
-        entries = tuple(
-            DocumentEntryImpact(
-                impact=impact,
-                old_context=_context_or_none(report.old_codebase, impact.entry_id),
-                new_context=_context_or_none(report.new_codebase, impact.entry_id),
-            )
-            for impact in sorted(impacts, key=lambda item: item.entry_id)
+    plans: list[EntryUpdatePlan] = []
+    for impact in sorted(report.entry_impacts, key=lambda item: item.entry_id):
+        entry = EntryImpactContext(
+            impact=impact,
+            old_context=_context_or_none(report.old_codebase, impact.entry_id),
+            new_context=_context_or_none(report.new_codebase, impact.entry_id),
         )
         related_ids = {
             evidence.changed_function_id
-            for entry in entries
             for evidence in entry.impact.evidence
         }
         context_ids = {
             function.id
-            for entry in entries
             for context in (entry.old_context, entry.new_context)
             if context is not None
             for function in context.functions
@@ -62,23 +44,17 @@ def create_document_plans(
         )
         diagnostics = _deduplicate_diagnostics(
             diagnostic
-            for entry in entries
             for context in (entry.old_context, entry.new_context)
             if context is not None
             for diagnostic in context.diagnostics
         )
-        covered_entry_ids = catalog.entry_ids_for(document_path) or tuple(
-            entry.entry_id for entry in entries
-        )
-        action = _document_action(report, covered_entry_ids)
+        action = _entry_action(report, entry.entry_id)
         if any(diagnostic.severity == "error" for diagnostic in diagnostics):
             action = DocumentAction.REVIEW
         plans.append(
-            EntryDocumentPlan(
-                document_path=document_path,
+            EntryUpdatePlan(
                 action=action,
-                covered_entry_ids=covered_entry_ids,
-                entries=entries,
+                entry=entry,
                 function_changes=tuple(
                     function_changes[function_id]
                     for function_id in sorted(related_ids)
@@ -91,10 +67,10 @@ def create_document_plans(
 
 
 def build_llm_context(
-    plan: EntryDocumentPlan,
+    plan: EntryUpdatePlan,
     old_document: str = "",
-) -> LlmDocumentContext:
-    return LlmDocumentContext(plan=plan, old_document=old_document)
+) -> LlmEntryContext:
+    return LlmEntryContext(plan=plan, old_document=old_document)
 
 
 def _context_or_none(
@@ -105,27 +81,9 @@ def _context_or_none(
     return codebase.dependency_context(entry_id)
 
 
-def _catalog_or_empty(
-    document_registry: DocumentCatalog | Mapping[str, str] | None,
-) -> DocumentCatalog:
-    if document_registry is None:
-        return DocumentCatalog()
-    if isinstance(document_registry, DocumentCatalog):
-        return document_registry
-    return DocumentCatalog.from_mapping(document_registry)
-
-
-def _document_action(
-    report: ImpactReport, covered_entry_ids: tuple[str, ...]
-) -> DocumentAction:
-    old_exists = any(
-        report.old_codebase.get_function(entry_id) is not None
-        for entry_id in covered_entry_ids
-    )
-    new_exists = any(
-        report.new_codebase.get_function(entry_id) is not None
-        for entry_id in covered_entry_ids
-    )
+def _entry_action(report: ImpactReport, entry_id: str) -> DocumentAction:
+    old_exists = report.old_codebase.get_function(entry_id) is not None
+    new_exists = report.new_codebase.get_function(entry_id) is not None
     if not old_exists:
         return DocumentAction.CREATE
     if not new_exists:
@@ -145,21 +103,6 @@ def _deduplicate_edge_changes(
         for change in changes
     }
     return tuple(unique[key] for key in sorted(unique))
-
-
-def _default_document_path(entry_id: str) -> str:
-    parts = entry_id.split(":")
-    if len(parts) >= 3:
-        language, module, name = parts[0], parts[1], ":".join(parts[2:])
-        return (
-            f"docs/entries/{_safe_component(language)}/"
-            f"{_safe_component(module)}/{_safe_component(name)}.md"
-        )
-    return f"docs/entries/{_safe_component(entry_id)}.md"
-
-
-def _safe_component(value: str) -> str:
-    return re.sub(r"[^A-Za-z0-9_.-]+", "-", value).strip("-") or "entry"
 
 
 def _deduplicate_diagnostics(

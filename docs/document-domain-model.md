@@ -1,80 +1,118 @@
-# 文档元数据与按需更新领域模型
+# Entry-scoped update model
 
-## 问题
+## Problem
 
-代码分析能够确定哪些入口受到变更影响，但文档的组织单位不必等于入口。对 Access Form 而言，
-同一窗体的 `bSave_Click`、`bCancel_Click` 等入口通常由一份窗体文档共同解释。因此，必须保存
-“哪个文档覆盖哪些入口”的显式关系，才能把代码变更确定地转换成待更新文档，而不让调用方临时猜测
-路径或让多个更新任务覆盖同一个文件。
+Code analysis determines which entry points are affected by a change. LLM analysis stays
+entry-scoped, while publication groups independently generated entry results by their
+canonical source file. This keeps prompts small without allowing one entry update to
+overwrite another entry stored in the same Markdown document.
 
-## 公共语言和最小 primitives
+Smaller LLMs also produce more reliable results when each request contains facts for one
+entry only. `document_updater` therefore converts each affected entry into one
+independent, deterministic update plan and one reference-data payload.
 
-| 名称 | 含义 | 身份 | 不变量 |
+## Public primitives
+
+| Name | Meaning | Identity | Invariant |
 | --- | --- | --- | --- |
-| `Entry` | 可被调用图识别并可能受影响的代码行为。 | 稳定 `entry_id`。 | 它是 CodeGraph / ChangeAnalyzer 的只读事实，不包含文档状态。 |
-| `Document` | 供维护者查询和阅读的项目文档。 | 规范项目相对 POSIX `document_path`。 | 内容、哈希、生成器和发布状态不属于关系模型。 |
-| `Coverage` | 一份文档明确覆盖的一组入口。 | `document_path` 与 `entry_ids`。 | 入口最多属于一份显式文档；一份文档必须覆盖至少一个入口。 |
-| `DocumentCatalog` | 有版本、确定性的 `Coverage` 集合。 | 版本控制的 JSON 文件。 | 文档路径和入口归属均唯一；不引入额外数据库 ID。 |
-| `DocumentUpdatePlan` | 一次变更后待处理的一份文档工作项。 | `document_path` 和本次工作快照。 | 每个受影响文档只有一项；保留每个受影响入口的证据。 |
+| `Entry` | A CodeGraph behavior that can be affected by a change. | Stable `entry_id`. | Read-only code-analysis fact with no document state. |
+| `EntryImpactContext` | One affected entry's change evidence plus baseline and working dependency contexts. | Its `entry_id`. | Both contexts remain traceable to the corresponding complete code snapshot. |
+| `EntryUpdatePlan` | A single entry's deterministic update work item. | Its `entry_id`. | Contains exactly one `EntryImpactContext`, related function/call-edge changes, diagnostics, and action. |
+| `PromptReference` | Action-specific data projection supplied to an LLM. | Its contained `entry_id`. | Contains one entry only and no document location or coverage metadata. |
+| `EntryDocumentResult` | LLM-produced Markdown body for one plan. | Stable `entry_id`. | Cannot contain reserved document-management markers. |
+| `SourceDocumentTarget` | Deterministic source-to-document mapping. | Canonical `source_id`. | Maps below `docs/` and cannot escape the documentation root. |
+| `DocumentSyncPlan` | Fully validated publication work. | One analysis run. | Contains at most one final mutation per source document plus non-published review results. |
 
-`Coverage` 是唯一持久化的代码—文档关系。`DocumentCatalog` 是该关系的集合名，不是需要生命周期、
-状态机或独立 ID 的新业务对象。
-
-## 关系和清单
-
-一份文档可以覆盖同一个 Form 的多个入口。一个入口不能同时归属两份显式文档，否则无法决定由哪一份
-文档承接它的更新。清单存放在项目中并随代码评审、版本化，例如 `docs/document-registry.json`：
-
-```json
-{
-  "version": 1,
-  "documents": [
-    {
-      "path": "docs/forms/order.md",
-      "entry_ids": [
-        "vba:frmOrder:bCancel_Click",
-        "vba:frmOrder:bSave_Click"
-      ]
-    },
-    {
-      "path": "docs/forms/customer.md",
-      "entry_ids": [
-        "vba:frmCustomer:bDelete_Click"
-      ]
-    }
-  ]
-}
-```
-
-路径必须是非空、规范的项目相对 POSIX 路径：不允许绝对路径、反斜杠、`.` 或 `..` 段。入口 ID 不可为空
-或重复；一个入口归属多份文档、同一路径登记多次都是错误。没有显式登记的入口使用现有默认路径，并产生
-不写回清单的隐式单入口 coverage，以保持现有调用方兼容。
-
-## 按需更新流程
+## Entry planning flow
 
 ```text
-完整源码快照
-  -> CodeGraph 提取 Entry
-  -> ChangeAnalyzer 比较旧/新图，产出 EntryImpact
-  -> DocumentCatalog 解析 entry_id -> document_path
-  -> 按 document_path 聚合受影响 EntryImpact
-  -> DocumentUpdatePlan
-  -> 调用方读取、生成、校验、发布文档
+complete source snapshots
+  -> CodeGraph extracts entries
+  -> ChangeAnalyzer compares baseline and working graphs
+  -> EntryImpact for every affected entry
+  -> create_entry_plans()
+  -> one EntryUpdatePlan per entry_id
+  -> one LLM result per automatable entry
+  -> group results by source_id
+  -> one final write/delete mutation per source document
 ```
 
-`EntryImpact` 仍是代码变更事实：它保留单一入口到变化函数的 old/new 路径。聚合阶段只将共享同一
-`document_path` 的影响组成一份 `DocumentUpdatePlan`，并保留每个入口各自的 impact、evidence、
-baseline context 和 working context。函数变化、调用边变化和 diagnostics 在文档计划级别稳定去重。
+`create_entry_plans(report)` sorts affected entry IDs and creates exactly one plan for
+each. Function changes, call-edge changes, and diagnostics are scoped to that entry's
+baseline and working dependency contexts and remain deterministically ordered.
 
-文档动作基于 catalog 覆盖的入口在旧、新代码图中的存在性确定：新出现的 coverage 为 `create`，完全
-消失的 coverage 为 `archive`，其余为 `update`；相关分析存在 error diagnostic 时为 `review`。
+The action is derived only from that entry's presence in the two code graphs:
 
-例如 `SharedRule` 同时被 `frmOrder` 和 `frmCustomer` 调用时，变更会产生
-`docs/forms/order.md` 和 `docs/forms/customer.md` 两份计划；`frmOrder` 的两个入口只会聚合到前者，
-不会产生两份会互相覆盖的任务。
+| Action | Meaning |
+| --- | --- |
+| `create` | The entry is new in the working graph. |
+| `update` | The entry exists in both snapshots and has related change evidence. |
+| `archive` | The entry only exists in the baseline graph. |
+| `review` | Its contexts contain an error diagnostic, so it should not be automatically published. |
 
-## 边界
+## Source-scoped document workflow
 
-`document_updater` 拥有 catalog 解析和计划聚合。`code_graph` 不读取文档或清单，`file_tracker` 不理解
-调用图和 coverage；因此 workspace 依赖方向不变。本模型不读取或写入 Markdown 内容，不调用 LLM，
-不记录内容哈希、最后更新时间、审批、失败重试或发布状态。这些应由 catalog 下游的发布流程拥有。
+`resolve_document_targets()` derives the target from the entry function's canonical
+`source_id`. A source such as `forms/frmOrder.frm` maps to
+`docs/forms/frmOrder.md`. Mapping collisions and unsafe paths are errors.
+
+Each entry is stored in a managed Markdown region:
+
+```markdown
+<!-- codegraph:source source_id="forms/frmOrder.frm" -->
+# frmOrder.frm
+
+<!-- codegraph:entry:start entry_id="vba:frmOrder:bSave_Click" -->
+## bSave_Click
+
+Saves the current order.
+<!-- codegraph:entry:end entry_id="vba:frmOrder:bSave_Click" -->
+```
+
+The LLM supplies only the entry body. The synchronization layer owns source headers,
+entry headings, and markers. It strictly rejects malformed, nested, duplicated, or
+injected markers instead of falling back to a whole-file rewrite.
+
+For LLM use, callers may pass current content as `old_document` and compose a Markdown
+template themselves. When a physical document contains multiple entries, extract only
+the current entry:
+
+```python
+old_entry_document = extract_entry_document(
+    current_document,
+    source_id=target.source_id,
+    entry_id=plan.entry_id,
+)
+context = build_llm_context(plan, old_document=old_entry_document or "")
+reference_data = context.to_reference_data_xml()
+prompt = template.replace("{{ reference_data }}", reference_data)
+```
+
+The XML includes the action, one `entry_id`, available code contexts, impact paths, and
+relevant changes. It deliberately excludes document paths, catalog data, and any document
+publication state.
+
+After all LLM calls complete, `build_document_sync_plan()` validates results, groups
+plans by target source document, and calculates mutations entirely in memory:
+
+| Action | Result requirement | Publication behavior |
+| --- | --- | --- |
+| `create` | Required | Add a new entry region; fail if it already exists. |
+| `update` | Required | Replace only the matching region; fail if it is absent. |
+| `archive` | Not accepted | Remove the matching region; delete the file if no managed or human-owned content remains. |
+| `review` | Optional | Produce a pending review and never mutate the published document. |
+
+Unmanaged preamble and trailing content are preserved. Non-whitespace content between
+managed entry regions is rejected because its ownership would be ambiguous. Managed
+sections are rendered in stable `entry_id` order.
+
+## Boundary
+
+`document_updater` owns entry-impact projection, reference-data serialization, pure
+source-document composition, and the mutation model. `code_graph` does not understand
+documents and `file_tracker` does not understand call graphs. Physical publication is
+still adapter-driven: `LocalDocumentStore` is a caller-side filesystem adapter, and
+other callers may apply the same `DocumentSyncPlan` to a repository API or database.
+
+All document mutations must succeed before advancing the FileTracker baseline. Filesystem
+writes are atomic per file, but publication across multiple files is not globally atomic.

@@ -9,13 +9,11 @@ from codegraph import Diagnostic, SourceFile, VbaAnalyzer
 from document_updater import (
     ArchivePromptReference,
     CreatePromptReference,
-    DocumentCatalog,
     DocumentAction,
-    DocumentRegistration,
     ReviewPromptReference,
     UpdatePromptReference,
     build_llm_context,
-    create_document_plans,
+    create_entry_plans,
 )
 from filetracker import FileTracker
 
@@ -32,7 +30,7 @@ def _sources(root: Path) -> tuple[SourceFile, ...]:
     )
 
 
-def test_plans_one_document_update_per_affected_entry(tmp_path: Path) -> None:
+def test_plans_one_entry_update_per_affected_entry(tmp_path: Path) -> None:
     _write(
         tmp_path,
         "frmOrder.frm",
@@ -65,7 +63,7 @@ def test_plans_one_document_update_per_affected_entry(tmp_path: Path) -> None:
     )
 
     report = analyze_changes(tracker.scan(), _sources(tmp_path), [VbaAnalyzer()])
-    plans = create_document_plans(report)
+    plans = create_entry_plans(report)
 
     assert [plan.entry_id for plan in plans] == [
         "vba:frmCustomer:bDelete_Click",
@@ -84,30 +82,37 @@ def test_plans_one_document_update_per_affected_entry(tmp_path: Path) -> None:
     )
     payload = context.to_payload()
     assert isinstance(payload.reference_data, UpdatePromptReference)
-    prompt = context.to_prompt()
-    root = ElementTree.fromstring(prompt)
+    reference_data = context.to_reference_data_xml()
+    root = ElementTree.fromstring(reference_data)
 
-    assert root.findtext("reference_data/action") == "update"
-    assert root.findtext("instructions/objective") == (
-        "Update the entry-oriented code document."
-    )
-    assert root.findtext("reference_data/existing_document") == (
+    assert root.tag == "reference_data"
+    assert root.findtext("action") == "update"
+    assert root.find("instructions") is None
+    assert root.findtext("existing_document") == (
         "# Save <button>\n\nOld & correct behavior."
     )
-    assert "vba:frmOrder:bSave_Click" in prompt
-    assert "vba:modRules:SharedRule" in prompt
-    assert "&lt;button&gt;" in prompt
-    assert "Old &amp; correct behavior." in prompt
-    assert root.find("reference_data/entries/entry/impact_evidence/"
-                     "change/old_paths") is not None
-    assert root.find("reference_data/entries/entry/impact_evidence/"
-                     "change/new_paths") is not None
+    assert "vba:frmOrder:bSave_Click" in reference_data
+    assert "vba:modRules:SharedRule" in reference_data
+    assert "&lt;button&gt;" in reference_data
+    assert "Old &amp; correct behavior." in reference_data
+    assert root.find("entry/impact_evidence/change/old_paths") is not None
+    assert root.find("entry/impact_evidence/change/new_paths") is not None
+    assert root.find("document_path") is None
+    assert root.find("covered_entry_ids") is None
     assert root.find(".//source_range") is None
-    assert root.find("reference_data/diagnostics") is None
-    assert context.to_prompt() == prompt
+    assert root.find("diagnostics") is None
+    assert context.to_reference_data_xml() == reference_data
+    assert payload.to_reference_data_xml() == reference_data
+    assert ElementTree.fromstring(
+        build_llm_context(plans[1]).to_reference_data_xml()
+    ).find("existing_document") is None
+    prompt = "# Update the document\n\n{{ reference_data }}".replace(
+        "{{ reference_data }}", reference_data
+    )
+    assert reference_data in prompt
 
 
-def test_empty_baseline_creates_documents_for_new_entries(tmp_path: Path) -> None:
+def test_empty_baseline_creates_entry_plans_for_new_entries(tmp_path: Path) -> None:
     tracker = FileTracker(str(tmp_path))
     _write(
         tmp_path,
@@ -124,7 +129,7 @@ def test_empty_baseline_creates_documents_for_new_entries(tmp_path: Path) -> Non
     )
 
     report = analyze_changes(tracker.scan(), _sources(tmp_path), [VbaAnalyzer()])
-    plans = create_document_plans(report)
+    plans = create_entry_plans(report)
 
     assert report.old_codebase.functions == ()
     assert [function.id for function in report.new_codebase.functions] == [
@@ -140,8 +145,8 @@ def test_empty_baseline_creates_documents_for_new_entries(tmp_path: Path) -> Non
         "vba:frmOrder:bSave_Click",
         "vba:modOrder:SaveOrder",
     }
-    assert plans[0].entries[0].old_context is None
-    assert plans[0].entries[0].new_context is not None
+    assert plans[0].entry.old_context is None
+    assert plans[0].entry.new_context is not None
 
     context = build_llm_context(
         plans[0],
@@ -149,17 +154,18 @@ def test_empty_baseline_creates_documents_for_new_entries(tmp_path: Path) -> Non
     )
     payload = context.to_payload()
     assert isinstance(payload.reference_data, CreatePromptReference)
-    root = ElementTree.fromstring(context.to_prompt())
+    reference_data = context.to_reference_data_xml()
+    root = ElementTree.fromstring(reference_data)
 
-    assert root.findtext("reference_data/action") == "create"
-    assert root.find("reference_data/entries/entry/new_context") is not None
-    assert root.find("reference_data/existing_document") is None
-    assert root.find("reference_data/entries/entry/old_context") is None
-    assert root.find("reference_data/entries/entry/impact_evidence") is None
-    assert root.find("reference_data/function_changes") is None
-    assert root.find("reference_data/call_edge_changes") is None
-    assert root.find("reference_data/diagnostics") is None
-    assert "This must not be included." not in context.to_prompt()
+    assert root.findtext("action") == "create"
+    assert root.find("entry/new_context") is not None
+    assert root.find("existing_document") is None
+    assert root.find("entry/old_context") is None
+    assert root.find("entry/impact_evidence") is None
+    assert root.find("function_changes") is None
+    assert root.find("call_edge_changes") is None
+    assert root.find("diagnostics") is None
+    assert "This must not be included." not in reference_data
 
 
 def test_archive_prompt_only_contains_baseline_and_deletion_facts(
@@ -184,7 +190,7 @@ def test_archive_prompt_only_contains_baseline_and_deletion_facts(
     (tmp_path / "modOrder.bas").unlink()
 
     report = analyze_changes(tracker.scan(), _sources(tmp_path), [VbaAnalyzer()])
-    plans = create_document_plans(report)
+    plans = create_entry_plans(report)
 
     assert len(plans) == 1
     assert plans[0].action is DocumentAction.ARCHIVE
@@ -195,18 +201,19 @@ def test_archive_prompt_only_contains_baseline_and_deletion_facts(
         change.change_type == "deleted"
         for change in payload.reference_data.deleted_functions
     )
-    root = ElementTree.fromstring(context.to_prompt())
+    root = ElementTree.fromstring(context.to_reference_data_xml())
 
-    assert root.findtext("reference_data/action") == "archive"
-    assert root.find("reference_data/entries/entry/old_context") is not None
-    assert root.find("reference_data/entries/entry/new_context") is None
-    assert root.find("reference_data/entries/entry/impact_evidence/"
-                     "change/old_paths") is not None
-    assert root.find("reference_data/entries/entry/impact_evidence/"
-                     "change/new_paths") is None
-    assert root.find("reference_data/deleted_functions") is not None
-    assert root.find("reference_data/function_changes") is None
-    assert root.find("reference_data/diagnostics") is None
+    assert root.findtext("action") == "archive"
+    assert root.find("entry/old_context") is not None
+    assert root.find("entry/new_context") is None
+    assert root.find("entry/impact_evidence/change/old_paths") is not None
+    assert root.find("entry/impact_evidence/change/new_paths") is None
+    assert root.find("deleted_functions") is not None
+    assert root.find("function_changes") is None
+    assert root.find("diagnostics") is None
+    assert ElementTree.fromstring(
+        build_llm_context(plans[0]).to_reference_data_xml()
+    ).find("existing_document") is None
 
 
 def test_review_prompt_keeps_available_facts_but_omits_diagnostics(
@@ -221,7 +228,7 @@ def test_review_prompt_keeps_available_facts_but_omits_diagnostics(
     )
     report = analyze_changes(tracker.scan(), _sources(tmp_path), [VbaAnalyzer()])
     plan = replace(
-        create_document_plans(report)[0],
+        create_entry_plans(report)[0],
         action=DocumentAction.REVIEW,
         diagnostics=(
             Diagnostic(
@@ -235,17 +242,18 @@ def test_review_prompt_keeps_available_facts_but_omits_diagnostics(
     context = build_llm_context(plan)
     payload = context.to_payload()
     assert isinstance(payload.reference_data, ReviewPromptReference)
-    root = ElementTree.fromstring(context.to_prompt())
+    reference_data = context.to_reference_data_xml()
+    root = ElementTree.fromstring(reference_data)
 
-    assert root.findtext("reference_data/action") == "review"
-    assert root.find("reference_data/existing_document") is None
-    assert root.find("reference_data/entries/entry/new_context") is not None
-    assert root.find("reference_data/function_changes") is not None
-    assert root.find("reference_data/diagnostics") is None
-    assert "ambiguous_call" not in context.to_prompt()
+    assert root.findtext("action") == "review"
+    assert root.find("existing_document") is None
+    assert root.find("entry/new_context") is not None
+    assert root.find("function_changes") is not None
+    assert root.find("diagnostics") is None
+    assert "ambiguous_call" not in reference_data
 
 
-def test_catalog_groups_affected_form_entries_into_one_document(tmp_path: Path) -> None:
+def test_plans_are_not_grouped_when_entries_share_a_source_file(tmp_path: Path) -> None:
     _write(
         tmp_path,
         "frmOrder.frm",
@@ -281,34 +289,16 @@ def test_catalog_groups_affected_form_entries_into_one_document(tmp_path: Path) 
     )
 
     report = analyze_changes(tracker.scan(), _sources(tmp_path), [VbaAnalyzer()])
-    catalog = DocumentCatalog(
-        (
-            DocumentRegistration(
-                "docs/forms/order.md",
-                (
-                    "vba:frmOrder:bSave_Click",
-                    "vba:frmOrder:bCancel_Click",
-                ),
-            ),
-            DocumentRegistration(
-                "docs/forms/customer.md",
-                ("vba:frmCustomer:bDelete_Click",),
-            ),
-        )
-    )
+    plans = create_entry_plans(report)
 
-    plans = create_document_plans(report, catalog)
-
-    assert [plan.document_path for plan in plans] == [
-        "docs/forms/customer.md",
-        "docs/forms/order.md",
-    ]
-    order_plan = plans[1]
-    assert order_plan.entry_ids == (
+    assert [plan.entry_id for plan in plans] == [
+        "vba:frmCustomer:bDelete_Click",
         "vba:frmOrder:bCancel_Click",
         "vba:frmOrder:bSave_Click",
-    )
-    assert order_plan.covered_entry_ids == order_plan.entry_ids
-    assert [change.function_id for change in order_plan.function_changes] == [
-        "vba:modRules:SharedRule"
     ]
+    assert all(plan.entry.impact.entry_id == plan.entry_id for plan in plans)
+    assert all(
+        [change.function_id for change in plan.function_changes]
+        == ["vba:modRules:SharedRule"]
+        for plan in plans
+    )

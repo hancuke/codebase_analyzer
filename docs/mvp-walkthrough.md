@@ -9,8 +9,8 @@ FileTracker ChangeSet
     -> function and call-edge changes
     -> affected entry points with old/new path evidence
     -> connected impact batches for independent change groups
-    -> one documentation plan per affected document
-    -> LLM-ready context
+    -> one entry update plan per affected entry
+    -> entry-scoped LLM reference data
 ```
 
 ## Packages
@@ -39,10 +39,10 @@ The example creates a temporary VBA project with two button-entry procedures sha
 3. adds `AuditOrder`;
 4. scans the physical file changes;
 5. builds old and new CodeGraph snapshots;
-6. shows that the shared change affects both entry documents;
-7. shows that the order-only changes affect only the save-button document;
+6. shows that the shared change affects both entries;
+7. shows that the order-only changes affect only the save-button entry;
 8. separates an unrelated report refresh change into a second impact batch;
-9. renders one LLM-ready update context.
+9. renders one entry-scoped LLM reference-data prompt.
 
 ## Important MVP behavior
 
@@ -71,13 +71,12 @@ entries that reach the function in the working graph
 Using both graphs preserves the impact of deleted functions and removed call edges while
 also finding newly introduced dependencies.
 
-`create_document_plans()` then resolves each affected entry through the versioned
-`DocumentCatalog` and produces one plan per affected document. Multiple entries of the
-same Access Form can therefore share one plan and one document; each entry still retains
-its own old/new path evidence and dependency context. A shared function across Forms
-intentionally appears in each affected Form document plan. See
-[`document-domain-model.md`](document-domain-model.md) for the minimal `Entry`,
-`Document`, `Coverage`, and `DocumentCatalog` model.
+`create_entry_plans()` produces exactly one plan per affected entry. Each plan and its
+reference data contain that entry's own old/new path evidence and dependency context. A
+shared function across Forms intentionally appears in each affected entry plan, but no
+LLM request contains multiple entries. Callers own the `entry_id`-to-document mapping and
+must explicitly combine results if several entries share one physical document. See
+[`document-domain-model.md`](document-domain-model.md) for the entry-scoped model.
 
 ## Current boundaries
 

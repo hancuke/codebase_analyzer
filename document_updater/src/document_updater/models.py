@@ -15,8 +15,8 @@ class DocumentAction(Enum):
 
 
 @dataclass(frozen=True)
-class DocumentEntryImpact:
-    """One affected entry's evidence and contexts within a document plan."""
+class EntryImpactContext:
+    """One affected entry's evidence and dependency contexts."""
 
     impact: EntryImpact
     old_context: AnalysisContext | None
@@ -36,31 +36,18 @@ class DocumentEntryImpact:
 
 
 @dataclass(frozen=True)
-class EntryDocumentPlan:
-    """One deterministic document update work item."""
+class EntryUpdatePlan:
+    """One deterministic, entry-scoped update work item."""
 
-    document_path: str
     action: DocumentAction
-    covered_entry_ids: tuple[str, ...]
-    entries: tuple[DocumentEntryImpact, ...]
+    entry: EntryImpactContext
     function_changes: tuple[FunctionChange, ...]
     call_edge_changes: tuple[CallEdgeChange, ...]
     diagnostics: tuple[Diagnostic, ...]
 
     @property
-    def entry_ids(self) -> tuple[str, ...]:
-        return tuple(entry.entry_id for entry in self.entries)
-
-    @property
     def entry_id(self) -> str:
-        """Compatibility accessor for callers that still expect one affected entry."""
-        return self.entries[0].entry_id
-
-
-@dataclass(frozen=True)
-class PromptInstructions:
-    objective: str
-    rules: tuple[str, ...]
+        return self.entry.entry_id
 
 
 @dataclass(frozen=True)
@@ -127,37 +114,29 @@ class PromptArchiveEntry:
 
 @dataclass(frozen=True)
 class CreatePromptReference:
-    document_path: str
-    covered_entry_ids: tuple[str, ...]
-    entries: tuple[PromptCreateEntry, ...]
+    entry: PromptCreateEntry
 
 
 @dataclass(frozen=True)
 class UpdatePromptReference:
-    document_path: str
-    covered_entry_ids: tuple[str, ...]
-    existing_document: str
-    entries: tuple[PromptChangedEntry, ...]
+    existing_document: str | None
+    entry: PromptChangedEntry
     function_changes: tuple[PromptFunctionChange, ...]
     call_edge_changes: tuple[PromptCallEdgeChange, ...]
 
 
 @dataclass(frozen=True)
 class ArchivePromptReference:
-    document_path: str
-    covered_entry_ids: tuple[str, ...]
-    existing_document: str
-    entries: tuple[PromptArchiveEntry, ...]
+    existing_document: str | None
+    entry: PromptArchiveEntry
     deleted_functions: tuple[PromptFunctionChange, ...]
     deleted_call_edges: tuple[PromptCallEdgeChange, ...]
 
 
 @dataclass(frozen=True)
 class ReviewPromptReference:
-    document_path: str
-    covered_entry_ids: tuple[str, ...]
     existing_document: str | None
-    entries: tuple[PromptChangedEntry, ...]
+    entry: PromptChangedEntry
     function_changes: tuple[PromptFunctionChange, ...]
     call_edge_changes: tuple[PromptCallEdgeChange, ...]
 
@@ -173,7 +152,6 @@ PromptReference = (
 @dataclass(frozen=True)
 class LlmPromptPayload:
     action: DocumentAction
-    instructions: PromptInstructions
     reference_data: PromptReference
 
     def __post_init__(self) -> None:
@@ -190,15 +168,15 @@ class LlmPromptPayload:
                 f"{expected_type.__name__}"
             )
 
-    def to_xml(self) -> str:
-        from .prompt import render_prompt_xml
+    def to_reference_data_xml(self) -> str:
+        from .prompt import render_reference_data_xml
 
-        return render_prompt_xml(self)
+        return render_reference_data_xml(self)
 
 
 @dataclass(frozen=True)
-class LlmDocumentContext:
-    plan: EntryDocumentPlan
+class LlmEntryContext:
+    plan: EntryUpdatePlan
     old_document: str
 
     def to_payload(self) -> LlmPromptPayload:
@@ -206,5 +184,5 @@ class LlmDocumentContext:
 
         return build_prompt_payload(self.plan, self.old_document)
 
-    def to_prompt(self) -> str:
-        return self.to_payload().to_xml()
+    def to_reference_data_xml(self) -> str:
+        return self.to_payload().to_reference_data_xml()
