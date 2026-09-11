@@ -58,105 +58,153 @@ class EntryDocumentPlan:
 
 
 @dataclass(frozen=True)
+class PromptInstructions:
+    objective: str
+    rules: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class PromptFunction:
+    function_id: str
+    source_id: str
+    source: str
+
+
+@dataclass(frozen=True)
+class PromptCodeContext:
+    functions: tuple[PromptFunction, ...]
+
+
+@dataclass(frozen=True)
+class PromptImpactEvidence:
+    changed_function_id: str
+    reason: str
+    old_paths: tuple[tuple[str, ...], ...]
+    new_paths: tuple[tuple[str, ...], ...]
+
+
+@dataclass(frozen=True)
+class PromptArchiveEvidence:
+    changed_function_id: str
+    reason: str
+    old_paths: tuple[tuple[str, ...], ...]
+
+
+@dataclass(frozen=True)
+class PromptFunctionChange:
+    function_id: str
+    change_type: str
+    diff: str
+
+
+@dataclass(frozen=True)
+class PromptCallEdgeChange:
+    source_function_id: str
+    target_function_id: str
+    change_type: str
+
+
+@dataclass(frozen=True)
+class PromptCreateEntry:
+    entry_id: str
+    new_context: PromptCodeContext
+
+
+@dataclass(frozen=True)
+class PromptChangedEntry:
+    entry_id: str
+    old_context: PromptCodeContext | None
+    new_context: PromptCodeContext | None
+    evidence: tuple[PromptImpactEvidence, ...]
+
+
+@dataclass(frozen=True)
+class PromptArchiveEntry:
+    entry_id: str
+    old_context: PromptCodeContext
+    evidence: tuple[PromptArchiveEvidence, ...]
+
+
+@dataclass(frozen=True)
+class CreatePromptReference:
+    document_path: str
+    covered_entry_ids: tuple[str, ...]
+    entries: tuple[PromptCreateEntry, ...]
+
+
+@dataclass(frozen=True)
+class UpdatePromptReference:
+    document_path: str
+    covered_entry_ids: tuple[str, ...]
+    existing_document: str
+    entries: tuple[PromptChangedEntry, ...]
+    function_changes: tuple[PromptFunctionChange, ...]
+    call_edge_changes: tuple[PromptCallEdgeChange, ...]
+
+
+@dataclass(frozen=True)
+class ArchivePromptReference:
+    document_path: str
+    covered_entry_ids: tuple[str, ...]
+    existing_document: str
+    entries: tuple[PromptArchiveEntry, ...]
+    deleted_functions: tuple[PromptFunctionChange, ...]
+    deleted_call_edges: tuple[PromptCallEdgeChange, ...]
+
+
+@dataclass(frozen=True)
+class ReviewPromptReference:
+    document_path: str
+    covered_entry_ids: tuple[str, ...]
+    existing_document: str | None
+    entries: tuple[PromptChangedEntry, ...]
+    function_changes: tuple[PromptFunctionChange, ...]
+    call_edge_changes: tuple[PromptCallEdgeChange, ...]
+
+
+PromptReference = (
+    CreatePromptReference
+    | UpdatePromptReference
+    | ArchivePromptReference
+    | ReviewPromptReference
+)
+
+
+@dataclass(frozen=True)
+class LlmPromptPayload:
+    action: DocumentAction
+    instructions: PromptInstructions
+    reference_data: PromptReference
+
+    def __post_init__(self) -> None:
+        expected_reference_types = {
+            DocumentAction.CREATE: CreatePromptReference,
+            DocumentAction.UPDATE: UpdatePromptReference,
+            DocumentAction.ARCHIVE: ArchivePromptReference,
+            DocumentAction.REVIEW: ReviewPromptReference,
+        }
+        expected_type = expected_reference_types[self.action]
+        if not isinstance(self.reference_data, expected_type):
+            raise ValueError(
+                f"{self.action.value} prompt requires "
+                f"{expected_type.__name__}"
+            )
+
+    def to_xml(self) -> str:
+        from .prompt import render_prompt_xml
+
+        return render_prompt_xml(self)
+
+
+@dataclass(frozen=True)
 class LlmDocumentContext:
     plan: EntryDocumentPlan
     old_document: str
 
+    def to_payload(self) -> LlmPromptPayload:
+        from .prompt import build_prompt_payload
+
+        return build_prompt_payload(self.plan, self.old_document)
+
     def to_prompt(self) -> str:
-        sections = [
-            "Update the entry-oriented code document from the supplied facts.",
-            "Preserve still-correct content and do not invent behavior.",
-            f"Action: {self.plan.action.value}",
-            f"Document: {self.plan.document_path}",
-            f"Covered entries: {', '.join(self.plan.covered_entry_ids)}",
-            "",
-            "## Existing document",
-            self.old_document or "(none)",
-            "",
-            "## Affected entries",
-            _format_entry_impacts(self.plan.entries),
-            "",
-            "## Function changes",
-            _format_function_changes(self.plan.function_changes),
-            "",
-            "## Call-edge changes",
-            _format_edge_changes(self.plan.call_edge_changes),
-            "",
-            "## Diagnostics",
-            _format_diagnostics(self.plan.diagnostics),
-        ]
-        return "\n".join(sections).rstrip() + "\n"
-
-
-def _format_function_changes(changes: tuple[FunctionChange, ...]) -> str:
-    if not changes:
-        return "(none)"
-    return "\n\n".join(
-        f"### {change.function_id} [{change.change_type.value}]\n"
-        f"```diff\n{change.diff.rstrip()}\n```"
-        for change in changes
-    )
-
-
-def _format_edge_changes(changes: tuple[CallEdgeChange, ...]) -> str:
-    if not changes:
-        return "(none)"
-    return "\n".join(
-        f"- [{change.change_type.value}] "
-        f"{change.source_function_id} -> {change.target_function_id}"
-        for change in changes
-    )
-
-
-def _format_entry_impacts(entries: tuple[DocumentEntryImpact, ...]) -> str:
-    if not entries:
-        return "(none)"
-    lines: list[str] = []
-    for entry in entries:
-        lines.extend(
-            [
-                f"### {entry.entry_id}",
-                "#### Impact evidence",
-                _format_evidence(entry.impact),
-                "#### Baseline entry context",
-                _format_analysis_context(entry.old_context),
-                "#### Working entry context",
-                _format_analysis_context(entry.new_context),
-            ]
-        )
-    return "\n".join(lines)
-
-
-def _format_evidence(impact: EntryImpact) -> str:
-    if not impact.evidence:
-        return "(none)"
-    return "\n".join(
-        f"- {item.changed_function_id}: {item.reason}; "
-        f"old_paths={_format_paths(item.old_paths)}; "
-        f"new_paths={_format_paths(item.new_paths)}"
-        for item in impact.evidence
-    )
-
-
-def _format_paths(paths: tuple[tuple[str, ...], ...]) -> str:
-    if not paths:
-        return "none"
-    return " | ".join(" -> ".join(path) for path in paths)
-
-
-def _format_analysis_context(context: AnalysisContext | None) -> str:
-    if context is None:
-        return "(entry absent)"
-    return "\n\n".join(
-        f"### {function.id}\n```text\n{function.source.rstrip()}\n```"
-        for function in context.functions
-    )
-
-
-def _format_diagnostics(diagnostics: tuple[Diagnostic, ...]) -> str:
-    if not diagnostics:
-        return "(none)"
-    return "\n".join(
-        f"- [{diagnostic.severity}] {diagnostic.code}: {diagnostic.message}"
-        for diagnostic in diagnostics
-    )
+        return self.to_payload().to_xml()

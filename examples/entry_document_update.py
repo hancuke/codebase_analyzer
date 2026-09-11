@@ -131,9 +131,9 @@ with tempfile.TemporaryDirectory() as directory:
         print(f"           entries:  {', '.join(plan.entry_ids)}")
         print(f"           changes:  {changed}")
 
-    print("\nONE LLM-READY CONTEXT (truncated)")
+    print("\nONE XML LLM-READY CONTEXT (truncated)")
     prompt = build_llm_context(
         plans[0],
         old_document="# Existing document\n\nDescribe the current entry behavior.",
     ).to_prompt()
-    print(prompt[:1600])
+    print(prompt )
