@@ -8,11 +8,12 @@
 from __future__ import annotations
 
 import tempfile
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 from change_analyzer import ImpactReport, analyze_changes
-from codegraph import SourceFile, VbaAnalyzer
+from codegraph import LanguageAnalyzer, SourceFile, VbaAnalyzer
 from document_updater import (
     DocumentAction,
     DocumentSyncPlan,
@@ -50,23 +51,32 @@ Return concise findings for another technical writer; do not write the final doc
 {{ reference_data }}
 """
 
+SourceLoader = Callable[[Path], Sequence[SourceFile]]
+EntryContentAuthor = Callable[[LlmEntryContext], str]
+
 
 def write(root: Path, name: str, content: str) -> None:
     (root / name).write_text(content, encoding="utf-8")
 
 
-def sources(root: Path) -> tuple[SourceFile, ...]:
+def load_text_sources(
+    root: Path,
+    *,
+    suffixes: Iterable[str],
+) -> tuple[SourceFile, ...]:
+    """Load a complete logical source snapshot for configured file suffixes."""
+    supported_suffixes = {suffix.casefold() for suffix in suffixes}
     return tuple(
         SourceFile(
             path.relative_to(root).as_posix(),
             path.read_text(encoding="utf-8"),
         )
         for path in sorted(root.rglob("*"))
-        if path.suffix.casefold() in {".bas", ".frm"}
+        if path.is_file() and path.suffix.casefold() in supported_suffixes
     )
 
 
-def entry_source_id(plan: EntryUpdatePlan) -> str:
+def plan_source_id(plan: EntryUpdatePlan) -> str:
     """Return the source owning an entry from the context valid for its action."""
     contexts = (
         (plan.entry.old_context,)
@@ -82,15 +92,15 @@ def entry_source_id(plan: EntryUpdatePlan) -> str:
 
 
 def analyze_source_changes(
-    source_root: Path,
     tracker: FileTracker,
+    working_sources: Sequence[SourceFile],
+    analyzers: Sequence[LanguageAnalyzer],
 ) -> ImpactReport:
     """Build an impact report from the tracked source snapshot."""
-    change_set = tracker.scan()
     return analyze_changes(
-        change_set,
-        sources(source_root),
-        [VbaAnalyzer()],
+        tracker.scan(),
+        working_sources,
+        analyzers,
     )
 
 
@@ -118,7 +128,7 @@ def author_entry_documents(
     for plan in plans:
         if plan.action not in {DocumentAction.CREATE, DocumentAction.UPDATE}:
             continue
-        target = target_by_source[entry_source_id(plan)]
+        target = target_by_source[plan_source_id(plan)]
         old_document = extract_entry_document(
             existing_documents.get(target.document_path, ""),
             source_id=target.source_id,
@@ -141,23 +151,107 @@ def apply_document_sync_plan(
     store.apply(sync_plan)
 
 
-def analyze_document_changes(
-    source_root: Path,
-    tracker: FileTracker,
-) -> tuple[EntryUpdatePlan, ...]:
-    """Return entry-scoped document plans for the current source changes."""
-    report = analyze_source_changes(source_root, tracker)
-    return create_entry_plans(report)
-
-
 def print_plans(title: str, plans: Iterable[EntryUpdatePlan]) -> None:
     print(title)
     for plan in plans:
         print(f"  {plan.action.value:8} {plan.entry_id}")
 
 
-with tempfile.TemporaryDirectory() as directory:
-    project_root = Path(directory)
+@dataclass(frozen=True)
+class PreparedDocumentationSync:
+    """One analyzed and fully validated synchronization transaction."""
+
+    report: ImpactReport
+    plans: tuple[EntryUpdatePlan, ...]
+    sync_plan: DocumentSyncPlan
+
+
+@dataclass(frozen=True)
+class DocumentationLifecycle:
+    """Language-independent entry documentation synchronization workflow."""
+
+    source_root: Path
+    tracker: FileTracker
+    store: LocalDocumentStore
+    analyzers: tuple[LanguageAnalyzer, ...]
+    source_loader: SourceLoader
+    content_for: EntryContentAuthor
+    docs_root: str = "docs"
+
+    def prepare(self) -> PreparedDocumentationSync:
+        """Analyze, author, and validate all mutations without publishing them."""
+        report = analyze_source_changes(
+            self.tracker,
+            self.source_loader(self.source_root),
+            self.analyzers,
+        )
+        plans = create_entry_plans(report)
+        targets, existing_documents = load_document_state(
+            plans,
+            self.store,
+            docs_root=self.docs_root,
+        )
+        results = author_entry_documents(
+            plans,
+            targets,
+            existing_documents,
+            content_for=self.content_for,
+        )
+        sync_plan = build_document_sync_plan(
+            plans,
+            results,
+            existing_documents,
+            docs_root=self.docs_root,
+        )
+        return PreparedDocumentationSync(report, plans, sync_plan)
+
+    def publish(self, prepared: PreparedDocumentationSync) -> None:
+        """Publish validated mutations, then advance the matching baseline."""
+        apply_document_sync_plan(self.store, prepared.sync_plan)
+         
+
+    def synchronize(self) -> PreparedDocumentationSync:
+        """Prepare and publish one complete synchronization transaction."""
+        prepared = self.prepare()
+        self.publish(prepared)
+        return prepared
+
+
+def create_vba_lifecycle(
+    source_root: Path,
+    document_root: Path,
+) -> DocumentationLifecycle:
+    """Configure the generic workflow for the VBA demonstration."""
+    tracker = FileTracker(str(source_root))
+    store = LocalDocumentStore(document_root)
+    author = MultiPromptEntryDocumentAuthor(
+        client=MockLlmClient(),
+        analysis_prompts=(
+            EntryAnalysisPrompt(
+                name="behavior",
+                template=BEHAVIOR_ANALYSIS_PROMPT,
+            ),
+            EntryAnalysisPrompt(
+                name="change-impact",
+                template=CHANGE_ANALYSIS_PROMPT,
+            ),
+        ),
+    )
+    return DocumentationLifecycle(
+        source_root=source_root,
+        tracker=tracker,
+        store=store,
+        analyzers=(VbaAnalyzer(),),
+        source_loader=lambda root: load_text_sources(
+            root,
+            suffixes=(".bas", ".cls", ".frm"),
+        ),
+        content_for=author.author,
+    )
+
+
+def run_vba_demo(project_root: Path) -> None:
+    """Create sample VBA sources and run initial and incremental syncs."""
     source_root = project_root / "src"
     document_root = project_root / "published"
     source_root.mkdir()
@@ -183,57 +277,10 @@ with tempfile.TemporaryDirectory() as directory:
         "End Sub\n",
     )
 
-    # Track source inputs only. Publishing docs must not invalidate the
-    # revision captured immediately before this synchronization run.
-    tracker = FileTracker(
-        str(source_root),
-        exclude_patterns=[
-            "docs",
-            "**/docs/**",
-            ".codegraph-reviews",
-            "**/.codegraph-reviews/**",
-        ],
-    )
-    store = LocalDocumentStore(document_root)
+    lifecycle = create_vba_lifecycle(source_root, document_root)
+    initial = lifecycle.synchronize()
+    print_plans("DOCUMENT SYNCHRONIZATION (INITIAL)", initial.plans)
 
-    llm_client = MockLlmClient()
-    author = MultiPromptEntryDocumentAuthor(
-        client=llm_client,
-        analysis_prompts=(
-            EntryAnalysisPrompt(
-                name="behavior",
-                template=BEHAVIOR_ANALYSIS_PROMPT,
-            ),
-            EntryAnalysisPrompt(
-                name="change-impact",
-                template=CHANGE_ANALYSIS_PROMPT,
-            ),
-        ),
-    )
-
-    plans = analyze_document_changes(source_root, tracker)
-    targets, existing_documents = load_document_state(
-        plans,
-        store,
-        docs_root="docs",
-    )
-    results = author_entry_documents(
-        plans,
-        targets,
-        existing_documents,
-        content_for=author.author,
-    )
-    sync_plan = build_document_sync_plan(
-        plans,
-        results,
-        existing_documents,
-        docs_root="docs",
-    )
-    apply_document_sync_plan(store, sync_plan)
-    print_plans("DOCUMENT SYNCHRONIZATION (INITIAL)", plans)
-
-    # Commit baseline and simulate an update
-    tracker.commit()
     write(
         source_root,
         "modBusiness.bas",
@@ -244,28 +291,19 @@ with tempfile.TemporaryDirectory() as directory:
         "End Sub\n",
     )
 
-    update_plans = analyze_document_changes(source_root, tracker)
-    update_targets, existing_documents = load_document_state(
-        update_plans,
-        store,
-        docs_root="docs",
-    )
-    update_results = author_entry_documents(
-        update_plans,
-        update_targets,
-        existing_documents,
-        content_for=author.author,
-    )
-    update_sync_plan = build_document_sync_plan(
-        update_plans,
-        update_results,
-        existing_documents,
-        docs_root="docs",
-    )
-    apply_document_sync_plan(store, update_sync_plan)
-    print_plans("\nDOCUMENT SYNCHRONIZATION (UPDATE)", update_plans)
+    update = lifecycle.synchronize()
+    print_plans("\nDOCUMENT SYNCHRONIZATION (UPDATE)", update.plans)
 
     print("\nSOURCE DOCUMENTS (FINAL)")
     for path in sorted((document_root / "docs").rglob("*.md")):
         print(f"  {path.relative_to(document_root)}")
         print(path.read_text(encoding="utf-8"))
+
+
+def main() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        run_vba_demo(Path(directory))
+
+
+if __name__ == "__main__":
+    main()
