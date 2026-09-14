@@ -77,6 +77,21 @@ FileTracker.scan()
 
 删除的函数仍可通过旧图找到原入口，新增加的调用关系则通过新图发现。
 
+`FileTracker` 应只跟踪源码输入，排除文档输出和 review queue。这样文档发布不会改变刚刚
+扫描到的 working revision，随后才能安全地使用该 revision 推进 baseline：
+
+```python
+tracker = FileTracker(
+    str(project_root),
+    exclude_patterns=[
+        "docs",
+        "**/docs/**",
+        ".codegraph-reviews",
+        "**/.codegraph-reviews/**",
+    ],
+)
+```
+
 ### 2.2 为每个入口创建 plan
 
 `create_entry_plans(report)` 为每个受影响入口创建一个 `EntryUpdatePlan`。plan 的身份是稳定的
@@ -521,4 +536,3 @@ store.apply(sync_plan)
 ```
 
 如果构建或发布失败，不提交 baseline。修复问题后重新运行即可重新处理相同代码变化。
-
