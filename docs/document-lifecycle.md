@@ -77,7 +77,7 @@ FileTracker.scan()
 
 删除的函数仍可通过旧图找到原入口，新增加的调用关系则通过新图发现。
 
-`FileTracker` 应只跟踪源码输入，排除文档输出和 review queue。这样文档发布不会改变刚刚
+`FileTracker` 应排除文档输出和 review queue。这样文档发布不会改变刚刚
 扫描到的 working revision，随后才能安全地使用该 revision 推进 baseline：
 
 ```python
@@ -196,7 +196,8 @@ source file 的第一个 plan 已经写入，而第二个 plan 在合并阶段�
 - 将 pending review 写入审核目录。
 
 单个文件使用“同目录临时文件 + `os.replace()`”原子写入。多个文件之间不是全局事务，因此只有所有
-目标都发布成功后，调用方才能提交 FileTracker baseline：
+文档同步函数不应隐式提交 FileTracker baseline。所有正式文档 mutation 都发布成功、且没有
+`pending_reviews` 后，由外部流程按自己的事务边界单独提交 baseline：
 
 ```python
 file_tracker.commit(
@@ -207,6 +208,8 @@ file_tracker.commit(
 ```
 
 发布失败时不推进 baseline，下次运行仍会分析同一批代码变化。
+`review` 会保留待审核的代码变更，不应推进 baseline；否则下次运行将无法再生成对应的
+审核任务。
 
 ## 3. 文档路径规则
 
