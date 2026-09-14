@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from change_analyzer import ChangeType, analyze_changes, cluster_impacts
+from change_analyzer import ChangeType, analyze_changes, cluster_impacts, entry_changes
 from codegraph import SourceFile, VbaAnalyzer
 from filetracker import FileTracker
 
@@ -163,3 +163,38 @@ def test_deleted_dependency_still_impacts_entry_from_old_graph(
         "vba:frmCustomer:bDelete_Click",
         "vba:frmOrder:bSave_Click",
     }
+
+
+def test_entry_changes_expose_entry_scoped_context_and_evidence(
+    tmp_path: Path,
+) -> None:
+    tracker = _baseline_project(tmp_path)
+    _write(
+        tmp_path,
+        "modBusiness.bas",
+        "Public Sub CheckPermission()\n"
+        "    result = 2\n"
+        "End Sub\n\n"
+        "Public Sub SaveOrder()\n"
+        "    result = 1\n"
+        "End Sub\n\n"
+        "Public Sub OrphanTask()\n"
+        "    result = 1\n"
+        "End Sub\n",
+    )
+
+    changes = entry_changes(
+        analyze_changes(tracker.scan(), _working_sources(tmp_path), [VbaAnalyzer()])
+    )
+
+    assert [change.entry_id for change in changes] == [
+        "vba:frmCustomer:bDelete_Click",
+        "vba:frmOrder:bSave_Click",
+    ]
+    assert all(change.old_context is not None for change in changes)
+    assert all(change.new_context is not None for change in changes)
+    assert all(
+        [item.function_id for item in change.function_changes]
+        == ["vba:modBusiness:CheckPermission"]
+        for change in changes
+    )

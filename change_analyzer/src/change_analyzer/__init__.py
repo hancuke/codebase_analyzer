@@ -1,8 +1,9 @@
-from .analyzer import analyze_changes, cluster_impacts
+from .analyzer import analyze_changes, cluster_impacts, entry_changes
 from .models import (
     CallEdgeChange,
     ChangeType,
     EntryImpact,
+    EntryChange,
     EntryImpactEvidence,
     FunctionChange,
     ImpactBatch,
@@ -16,6 +17,7 @@ __all__ = [
     "CallEdgeChange",
     "ChangeType",
     "EntryImpact",
+    "EntryChange",
     "EntryImpactEvidence",
     "FunctionChange",
     "ImpactBatch",
@@ -25,4 +27,5 @@ __all__ = [
     "analyze_changes",
     "build_source_snapshots",
     "cluster_impacts",
+    "entry_changes",
 ]

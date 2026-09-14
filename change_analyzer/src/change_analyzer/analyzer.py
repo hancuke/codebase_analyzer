@@ -4,7 +4,7 @@ import difflib
 from collections import defaultdict
 from collections.abc import Sequence
 
-from codegraph import Codebase, LanguageAnalyzer, SourceFile
+from codegraph import AnalysisContext, Codebase, Diagnostic, LanguageAnalyzer, SourceFile
 from filetracker import ChangeSet
 
 from .models import (
@@ -12,6 +12,7 @@ from .models import (
     ChangeType,
     EntryImpact,
     EntryImpactEvidence,
+    EntryChange,
     FunctionChange,
     ImpactBatch,
     ImpactReport,
@@ -88,6 +89,100 @@ def cluster_impacts(report: ImpactReport) -> tuple[ImpactBatch, ...]:
         sorted(
             batches,
             key=lambda batch: (batch.entry_ids, batch.changed_function_ids),
+        )
+    )
+
+
+def entry_changes(report: ImpactReport) -> tuple[EntryChange, ...]:
+    """Project deterministic, entry-scoped code facts from an impact report."""
+    changes_by_id = {
+        change.function_id: change for change in report.function_changes
+    }
+    projected: list[EntryChange] = []
+    for impact in report.entry_impacts:
+        old_context = _context_or_none(report.old_codebase, impact.entry_id)
+        new_context = _context_or_none(report.new_codebase, impact.entry_id)
+        context_ids = {
+            function.id
+            for context in (old_context, new_context)
+            if context is not None
+            for function in context.functions
+        }
+        projected.append(
+            EntryChange(
+                entry_id=impact.entry_id,
+                old_entry=impact.old_entry,
+                new_entry=impact.new_entry,
+                old_context=old_context,
+                new_context=new_context,
+                evidence=impact.evidence,
+                function_changes=tuple(
+                    changes_by_id[item.changed_function_id]
+                    for item in impact.evidence
+                ),
+                call_edge_changes=_entry_call_edge_changes(
+                    report.call_edge_changes,
+                    context_ids,
+                ),
+                diagnostics=_entry_diagnostics(old_context, new_context),
+            )
+        )
+    return tuple(projected)
+
+
+def _context_or_none(
+    codebase: Codebase,
+    entry_id: str,
+) -> AnalysisContext | None:
+    if codebase.get_function(entry_id) is None:
+        return None
+    return codebase.dependency_context(entry_id)
+
+
+def _entry_call_edge_changes(
+    changes: tuple[CallEdgeChange, ...],
+    context_ids: set[str],
+) -> tuple[CallEdgeChange, ...]:
+    unique = {
+        (
+            change.source_function_id,
+            change.target_function_id,
+            change.change_type.value,
+        ): change
+        for change in changes
+        if change.source_function_id in context_ids
+        or change.target_function_id in context_ids
+    }
+    return tuple(unique[key] for key in sorted(unique))
+
+
+def _entry_diagnostics(
+    old_context: AnalysisContext | None,
+    new_context: AnalysisContext | None,
+) -> tuple[Diagnostic, ...]:
+    unique = {
+        (
+            item.code,
+            item.severity,
+            item.message,
+            item.source_id,
+            item.function_id,
+            item.line,
+        ): item
+        for context in (old_context, new_context)
+        if context is not None
+        for item in context.diagnostics
+    }
+    return tuple(
+        unique[key]
+        for key in sorted(
+            unique,
+            key=lambda item: (
+                item[3] or "",
+                item[5] or 0,
+                item[0],
+                item[4] or "",
+            ),
         )
     )
 

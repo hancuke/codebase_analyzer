@@ -6,6 +6,7 @@ requires-python = ">=3.10"
 members = [
     "change-analyzer",
     "codegraph",
+    "document-author",
     "document-updater",
     "filetracker",
 ]
@@ -49,19 +50,20 @@ wheels = [
 ]
 
 [[package]]
-name = "document-updater"
+name = "document-author"
 version = "0.1.0"
-source = { editable = "document_updater" }
+source = { editable = "document_author" }
 dependencies = [
-    { name = "change-analyzer" },
-    { name = "codegraph" },
+    { name = "document-updater" },
 ]
 
 [package.metadata]
-requires-dist = [
-    { name = "change-analyzer", editable = "change_analyzer" },
-    { name = "codegraph", editable = "code_graph" },
-]
+requires-dist = [{ name = "document-updater", editable = "document_updater" }]
+
+[[package]]
+name = "document-updater"
+version = "0.1.0"
+source = { editable = "document_updater" }
 
 [[package]]
 name = "exceptiongroup"

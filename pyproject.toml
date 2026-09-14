@@ -4,6 +4,7 @@ members = [
     "file_tracker",
     "change_analyzer",
     "document_updater",
+    "document_author",
 ]
 
 [dependency-groups]

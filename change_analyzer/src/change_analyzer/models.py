@@ -3,7 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
-from codegraph import Codebase, Diagnostic, EntryPoint, Function, SourceFile
+from codegraph import (
+    AnalysisContext,
+    Codebase,
+    Diagnostic,
+    EntryPoint,
+    Function,
+    SourceFile,
+)
 
 
 class ChangeType(Enum):
@@ -57,6 +64,21 @@ class EntryImpact:
     old_entry: EntryPoint | None
     new_entry: EntryPoint | None
     evidence: tuple[EntryImpactEvidence, ...]
+
+
+@dataclass(frozen=True)
+class EntryChange:
+    """Complete, entry-scoped code-change facts for a documentation workflow."""
+
+    entry_id: str
+    old_entry: EntryPoint | None
+    new_entry: EntryPoint | None
+    old_context: AnalysisContext | None
+    new_context: AnalysisContext | None
+    evidence: tuple[EntryImpactEvidence, ...]
+    function_changes: tuple[FunctionChange, ...]
+    call_edge_changes: tuple[CallEdgeChange, ...]
+    diagnostics: tuple[Diagnostic, ...]
 
 
 @dataclass(frozen=True)

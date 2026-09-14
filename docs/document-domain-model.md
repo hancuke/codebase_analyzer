@@ -1,118 +1,43 @@
-# Entry-scoped update model
+# 文档更新领域模型
 
-## Problem
+文档更新由三个独立领域组合，而不是由一个 Entry 同步服务隐式完成。
 
-Code analysis determines which entry points are affected by a change. LLM analysis stays
-entry-scoped, while publication groups independently generated entry results by their
-canonical source file. This keeps prompts small without allowing one entry update to
-overwrite another entry stored in the same Markdown document.
-
-Smaller LLMs also produce more reliable results when each request contains facts for one
-entry only. `document_updater` therefore converts each affected entry into one
-independent, deterministic update plan and one reference-data payload.
-
-## Public primitives
-
-| Name | Meaning | Identity | Invariant |
+| 领域 | 所有者 | 输入 | 输出 |
 | --- | --- | --- | --- |
-| `Entry` | A CodeGraph behavior that can be affected by a change. | Stable `entry_id`. | Read-only code-analysis fact with no document state. |
-| `EntryImpactContext` | One affected entry's change evidence plus baseline and working dependency contexts. | Its `entry_id`. | Both contexts remain traceable to the corresponding complete code snapshot. |
-| `EntryUpdatePlan` | A single entry's deterministic update work item. | Its `entry_id`. | Contains exactly one `EntryImpactContext`, related function/call-edge changes, diagnostics, and action. |
-| `PromptReference` | Action-specific data projection supplied to an LLM. | Its contained `entry_id`. | Contains one entry only and no document location or coverage metadata. |
-| `EntryDocumentResult` | LLM-produced Markdown body for one plan. | Stable `entry_id`. | Cannot contain reserved document-management markers. |
-| `SourceDocumentTarget` | Deterministic source-to-document mapping. | Canonical `source_id`. | Maps below `docs/` and cannot escape the documentation root. |
-| `DocumentSyncPlan` | Fully validated publication work. | One analysis run. | Contains at most one final mutation per source document plus non-published review results. |
+| 代码变更影响 | `change_analyzer` | ChangeSet、完整工作源码、analyzers | `EntryChange[]` |
+| 内容生成 | `document_author` | `AuthorRequest` | `DocumentResult` |
+| Markdown fragment 编辑 | `document_updater` | 一份 Markdown、一个 `DocumentResult` | `AppliedDocument` |
 
-## Entry planning flow
+## EntryChange
 
-```text
-complete source snapshots
-  -> CodeGraph extracts entries
-  -> ChangeAnalyzer compares baseline and working graphs
-  -> EntryImpact for every affected entry
-  -> create_entry_plans()
-  -> one EntryUpdatePlan per entry_id
-  -> one LLM result per automatable entry
-  -> group results by source_id
-  -> one final write/delete mutation per source document
-```
+`entry_changes(report)` 从 `ImpactReport` 投影出一个 Entry 一个事实对象。它在 baseline 和
+working 图中同时反向遍历，因而保留删除调用、删除函数和新增依赖的影响证据。对象包含 old/new
+Entry 和 dependency context、函数与调用边变化、path evidence 及 diagnostics。
 
-`create_entry_plans(report)` sorts affected entry IDs and creates exactly one plan for
-each. Function changes, call-edge changes, and diagnostics are scoped to that entry's
-baseline and working dependency contexts and remain deterministically ordered.
+它不包含文档动作、LLM、路径或发布规则。
 
-The action is derived only from that entry's presence in the two code graphs:
+## AuthorRequest 和 DocumentResult
 
-| Action | Meaning |
-| --- | --- |
-| `create` | The entry is new in the working graph. |
-| `update` | The entry exists in both snapshots and has related change evidence. |
-| `archive` | The entry only exists in the baseline graph. |
-| `review` | Its contexts contain an error diagnostic, so it should not be automatically published. |
-
-## Source-scoped document workflow
-
-`resolve_document_targets()` derives the target from the entry function's canonical
-`source_id`. A source such as `forms/frmOrder.frm` maps to
-`docs/forms/frmOrder.md`. Mapping collisions and unsafe paths are errors.
-
-Each entry is stored in a managed Markdown region:
-
-```markdown
-<!-- codegraph:source source_id="forms/frmOrder.frm" -->
-# frmOrder.frm
-
-<!-- codegraph:entry:start entry_id="vba:frmOrder:bSave_Click" -->
-## bSave_Click
-
-Saves the current order.
-<!-- codegraph:entry:end entry_id="vba:frmOrder:bSave_Click" -->
-```
-
-The LLM supplies only the entry body. The synchronization layer owns source headers,
-entry headings, and markers. It strictly rejects malformed, nested, duplicated, or
-injected markers instead of falling back to a whole-file rewrite.
-
-For LLM use, callers may pass current content as `old_document` and compose a Markdown
-template themselves. When a physical document contains multiple entries, extract only
-the current entry:
+应用层将一个或多个 `EntryChange` 转换为：
 
 ```python
-old_entry_document = extract_entry_document(
-    current_document,
-    source_id=target.source_id,
-    entry_id=plan.entry_id,
+AuthorRequest(
+    fragment_id="entry:vba:frmOrder:bSave_Click",
+    instructions="...",
+    blocks=(PromptBlock("code_context", "..."),),
 )
-context = build_llm_context(plan, old_document=old_entry_document or "")
-reference_data = context.to_reference_data_xml()
-prompt = template.replace("{{ reference_data }}", reference_data)
 ```
 
-The XML includes the action, one `entry_id`, available code contexts, impact paths, and
-relevant changes. It deliberately excludes document paths, catalog data, and any document
-publication state.
+`DocumentAuthor` 只渲染 ordered blocks 并调用 LLM，返回 `DocumentResult`。`UPSERT` 表示该
+fragment 的完整 Markdown 期望状态；`DELETE` 表示该 fragment 不应存在，无需 LLM。
 
-After all LLM calls complete, `build_document_sync_plan()` validates results, groups
-plans by target source document, and calculates mutations entirely in memory:
+多个 Entry 是否合成一次请求、哪些 diagnostics 转为审核，都是应用层策略。
 
-| Action | Result requirement | Publication behavior |
-| --- | --- | --- |
-| `create` | Required | Add a new entry region; fail if it already exists. |
-| `update` | Required | Replace only the matching region; fail if it is absent. |
-| `archive` | Not accepted | Remove the matching region; delete the file if no managed or human-owned content remains. |
-| `review` | Optional | Produce a pending review and never mutate the published document. |
+## Fragment 编辑
 
-Unmanaged preamble and trailing content are preserved. Non-whitespace content between
-managed entry regions is rejected because its ownership would be ambiguous. Managed
-sections are rendered in stable `entry_id` order.
+`apply_result(existing_markdown, result)` 是纯单文档操作。它通过 canonical
+`codegraph:fragment` markers 识别受管内容：UPSERT 插入或替换，DELETE 幂等删除。Markdown
+前后的人工内容保持不变；fragment 之间的无归属内容、损坏或注入的 marker 会被拒绝。
 
-## Boundary
-
-`document_updater` owns entry-impact projection, reference-data serialization, pure
-source-document composition, and the mutation model. `code_graph` does not understand
-documents and `file_tracker` does not understand call graphs. Physical publication is
-still adapter-driven: `LocalDocumentStore` is a caller-side filesystem adapter, and
-other callers may apply the same `DocumentSyncPlan` to a repository API or database.
-
-All document mutations must succeed before advancing the FileTracker baseline. Filesystem
-writes are atomic per file, but publication across multiple files is not globally atomic.
+`AppliedDocument.fragment_ids` 只描述剩余受管 fragments。物理文件是否应删除、路径映射、加载和
+写入完全由调用方决定。

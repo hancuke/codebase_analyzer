@@ -1,308 +1,213 @@
-# Example: one documentation synchronization flow for initial and later runs.
-#
-# An empty FileTracker baseline makes every discovered entry a CREATE plan.
-# An existing baseline automatically produces UPDATE or ARCHIVE plans as
-# appropriate; callers never classify forms themselves. Advancing the
-# FileTracker baseline is intentionally owned by a separate caller workflow.
+"""Run a complete caller-owned documentation lifecycle.
+
+This example deliberately keeps document paths, storage, grouping, and baseline
+advancement outside the three reusable packages. Run it with:
+
+    uv run python examples/documentation_lifecycle.py
+"""
 
 from __future__ import annotations
 
 import tempfile
-from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from collections import defaultdict
+from collections.abc import Iterable, Mapping
 from pathlib import Path
+from xml.etree import ElementTree
 
-from change_analyzer import ImpactReport, analyze_changes
-from codegraph import LanguageAnalyzer, SourceFile, VbaAnalyzer
-from document_updater import (
-    DocumentAction,
-    DocumentSyncPlan,
-    EntryDocumentResult,
-    LocalDocumentStore,
-    SourceDocumentTarget,
-    build_document_sync_plan,
-    build_llm_context,
-    create_entry_plans,
-    extract_entry_document,
-    resolve_document_targets,
+from change_analyzer import EntryChange, analyze_changes, entry_changes
+from codegraph import SourceFile, VbaAnalyzer
+from document_author import (
+    AuthorRequest,
+    LlmDocumentAuthor,
+    PromptBlock,
+    XmlPromptRenderer,
 )
-from document_updater.models import EntryUpdatePlan, LlmEntryContext
+from document_updater import DocumentResult, ResultKind, apply_result
 from filetracker import FileTracker
 
-from llm_client import (
-    EntryAnalysisPrompt,
-    MockLlmClient,
-    MultiPromptEntryDocumentAuthor,
-)
+
+DocumentKey = str
 
 
-BEHAVIOR_ANALYSIS_PROMPT = """\
-Analyze the entry point's externally observable behavior, control flow, and key dependencies.
-Return concise findings for another technical writer; do not write the final document.
+class DemoLlmClient:
+    """A deterministic stand-in for a real LLM provider adapter."""
 
-{{ reference_data }}
-"""
-
-CHANGE_ANALYSIS_PROMPT = """\
-Analyze how the supplied changes affect this entry point and identify documentation risks,
-including obsolete statements in the existing document.
-Return concise findings for another technical writer; do not write the final document.
-
-{{ reference_data }}
-"""
-
-SourceLoader = Callable[[Path], Sequence[SourceFile]]
-EntryContentAuthor = Callable[[LlmEntryContext], str]
+    def generate(self, prompt: str) -> str:
+        root = ElementTree.fromstring(prompt)
+        entry_id = next(
+            block.text
+            for block in root.findall("blocks/block")
+            if block.get("name") == "entry_id"
+        )
+        return (
+            f"## {entry_id.rsplit(':', 1)[-1]}\n\n"
+            f"This generated fragment documents `{entry_id}`."
+        )
 
 
-def write(root: Path, name: str, content: str) -> None:
-    (root / name).write_text(content, encoding="utf-8")
-
-
-def load_text_sources(
-    root: Path,
-    *,
-    suffixes: Iterable[str],
-) -> tuple[SourceFile, ...]:
-    """Load a complete logical source snapshot for configured file suffixes."""
-    supported_suffixes = {suffix.casefold() for suffix in suffixes}
+def load_vba_sources(source_root: Path) -> tuple[SourceFile, ...]:
+    """Load the complete current source snapshot required by change_analyzer."""
     return tuple(
         SourceFile(
-            path.relative_to(root).as_posix(),
+            path.relative_to(source_root).as_posix(),
             path.read_text(encoding="utf-8"),
         )
-        for path in sorted(root.rglob("*"))
-        if path.is_file() and path.suffix.casefold() in supported_suffixes
+        for path in sorted(source_root.rglob("*"))
+        if path.is_file() and path.suffix.casefold() in {".bas", ".frm"}
     )
 
 
-def plan_source_id(plan: EntryUpdatePlan) -> str:
-    """Return the source owning an entry from the context valid for its action."""
-    contexts = (
-        (plan.entry.old_context,)
-        if plan.action is DocumentAction.ARCHIVE
-        else (plan.entry.new_context, plan.entry.old_context)
+def request_for_entry(change: EntryChange) -> AuthorRequest:
+    """The application selects the Entry facts it exposes to the author."""
+    context = "\n\n".join(
+        function.source
+        for analysis_context in (change.old_context, change.new_context)
+        if analysis_context is not None
+        for function in analysis_context.functions
     )
-    for context in contexts:
-        if context is not None:
-            for function in context.functions:
-                if function.id == plan.entry_id:
-                    return function.source_id
-    raise ValueError(f"entry {plan.entry_id!r} is missing from its context")
-
-
-def analyze_source_changes(
-    tracker: FileTracker,
-    working_sources: Sequence[SourceFile],
-    analyzers: Sequence[LanguageAnalyzer],
-) -> ImpactReport:
-    """Build an impact report from the tracked source snapshot."""
-    return analyze_changes(
-        tracker.scan(),
-        working_sources,
-        analyzers,
+    return AuthorRequest(
+        fragment_id=fragment_id_for(change),
+        instructions=(
+            "Write a concise Markdown fragment for this entry. "
+            "Do not include structural codegraph markers."
+        ),
+        blocks=(
+            PromptBlock("entry_id", change.entry_id),
+            PromptBlock("code_context", context),
+            PromptBlock(
+                "function_changes",
+                "\n".join(item.diff for item in change.function_changes),
+            ),
+        ),
     )
 
 
-def load_document_state(
-    plans: Iterable[EntryUpdatePlan],
-    store: LocalDocumentStore,
-    *,
-    docs_root: str,
-) -> tuple[tuple[SourceDocumentTarget, ...], dict[str, str]]:
-    """Resolve source targets and load their current documents."""
-    targets = resolve_document_targets(plans, docs_root=docs_root)
-    return targets, store.load(targets)
+def fragment_id_for(change: EntryChange) -> str:
+    return f"entry:{change.entry_id}"
 
 
-def author_entry_documents(
-    plans: Iterable[EntryUpdatePlan],
-    targets: Iterable[SourceDocumentTarget],
-    existing_documents: Mapping[str, str],
-    *,
-    content_for: Callable[[LlmEntryContext], str],
-) -> tuple[EntryDocumentResult, ...]:
-    """Generate one document result for each CREATE or UPDATE plan."""
-    target_by_source = {target.source_id: target for target in targets}
-    results: list[EntryDocumentResult] = []
-    for plan in plans:
-        if plan.action not in {DocumentAction.CREATE, DocumentAction.UPDATE}:
+def document_key_for(change: EntryChange) -> DocumentKey:
+    """Caller policy: Entries from one source file share one Markdown document."""
+    for context in (change.new_context, change.old_context):
+        if context is None:
             continue
-        target = target_by_source[plan_source_id(plan)]
-        old_document = extract_entry_document(
-            existing_documents.get(target.document_path, ""),
-            source_id=target.source_id,
-            entry_id=plan.entry_id,
-        ) or ""
-        results.append(
-            EntryDocumentResult(
-                plan.entry_id,
-                content_for(build_llm_context(plan, old_document=old_document)),
-            )
-        )
-    return tuple(results)
+        for function in context.functions:
+            if function.id == change.entry_id:
+                return f"docs/{Path(function.source_id).with_suffix('.md')}"
+    raise ValueError(f"entry {change.entry_id!r} is missing from both contexts")
 
 
-def apply_document_sync_plan(
-    store: LocalDocumentStore,
-    sync_plan: DocumentSyncPlan,
+def produce_results(
+    changes: Iterable[EntryChange],
+    author: LlmDocumentAuthor,
+) -> tuple[tuple[DocumentKey, DocumentResult], ...]:
+    """Map code facts to desired fragment states; deletion needs no LLM request."""
+    produced: list[tuple[DocumentKey, DocumentResult]] = []
+    for change in changes:
+        key = document_key_for(change)
+        if change.new_entry is None:
+            result = DocumentResult(fragment_id_for(change), ResultKind.DELETE)
+        else:
+            result = author.author(request_for_entry(change))
+        produced.append((key, result))
+    return tuple(produced)
+
+
+def publish_results(
+    document_root: Path,
+    results: Iterable[tuple[DocumentKey, DocumentResult]],
 ) -> None:
-    """Apply a validated document mutation plan."""
-    store.apply(sync_plan)
+    """Caller-owned grouping, physical I/O, and physical-file deletion policy."""
+    by_document: dict[DocumentKey, list[DocumentResult]] = defaultdict(list)
+    for key, result in results:
+        by_document[key].append(result)
+
+    for key in sorted(by_document):
+        path = document_root / key
+        markdown = path.read_text(encoding="utf-8") if path.exists() else ""
+        for result in by_document[key]:
+            markdown = apply_result(markdown, result).markdown
+
+        # This policy deletes a file only when it has no managed fragments and
+        # no caller-owned Markdown. Different callers can choose differently.
+        if not markdown.strip():
+            path.unlink(missing_ok=True)
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(markdown, encoding="utf-8")
 
 
-def print_plans(title: str, plans: Iterable[EntryUpdatePlan]) -> None:
-    print(title)
-    for plan in plans:
-        print(f"  {plan.action.value:8} {plan.entry_id}")
-
-
-@dataclass(frozen=True)
-class PreparedDocumentationSync:
-    """One analyzed and fully validated synchronization transaction."""
-
-    report: ImpactReport
-    plans: tuple[EntryUpdatePlan, ...]
-    sync_plan: DocumentSyncPlan
-
-
-@dataclass(frozen=True)
-class DocumentationLifecycle:
-    """Language-independent entry documentation synchronization workflow."""
-
-    source_root: Path
-    tracker: FileTracker
-    store: LocalDocumentStore
-    analyzers: tuple[LanguageAnalyzer, ...]
-    source_loader: SourceLoader
-    content_for: EntryContentAuthor
-    docs_root: str = "docs"
-
-    def prepare(self) -> PreparedDocumentationSync:
-        """Analyze, author, and validate all mutations without publishing them."""
-        report = analyze_source_changes(
-            self.tracker,
-            self.source_loader(self.source_root),
-            self.analyzers,
-        )
-        plans = create_entry_plans(report)
-        targets, existing_documents = load_document_state(
-            plans,
-            self.store,
-            docs_root=self.docs_root,
-        )
-        results = author_entry_documents(
-            plans,
-            targets,
-            existing_documents,
-            content_for=self.content_for,
-        )
-        sync_plan = build_document_sync_plan(
-            plans,
-            results,
-            existing_documents,
-            docs_root=self.docs_root,
-        )
-        return PreparedDocumentationSync(report, plans, sync_plan)
-
-    def publish(self, prepared: PreparedDocumentationSync) -> None:
-        """Publish validated mutations, then advance the matching baseline."""
-        apply_document_sync_plan(self.store, prepared.sync_plan)
-         
-
-    def synchronize(self) -> PreparedDocumentationSync:
-        """Prepare and publish one complete synchronization transaction."""
-        prepared = self.prepare()
-        self.publish(prepared)
-        return prepared
-
-
-def create_vba_lifecycle(
+def synchronize(
     source_root: Path,
     document_root: Path,
-) -> DocumentationLifecycle:
-    """Configure the generic workflow for the VBA demonstration."""
-    tracker = FileTracker(str(source_root))
-    store = LocalDocumentStore(document_root)
-    author = MultiPromptEntryDocumentAuthor(
-        client=MockLlmClient(),
-        analysis_prompts=(
-            EntryAnalysisPrompt(
-                name="behavior",
-                template=BEHAVIOR_ANALYSIS_PROMPT,
-            ),
-            EntryAnalysisPrompt(
-                name="change-impact",
-                template=CHANGE_ANALYSIS_PROMPT,
-            ),
-        ),
+    tracker: FileTracker,
+    author: LlmDocumentAuthor,
+) -> None:
+    """Analyze one source revision, publish its results, then advance baseline."""
+    report = analyze_changes(
+        tracker.scan(),
+        load_vba_sources(source_root),
+        [VbaAnalyzer()],
     )
-    return DocumentationLifecycle(
-        source_root=source_root,
-        tracker=tracker,
-        store=store,
-        analyzers=(VbaAnalyzer(),),
-        source_loader=lambda root: load_text_sources(
-            root,
-            suffixes=(".bas", ".cls", ".frm"),
-        ),
-        content_for=author.author,
+    changes = entry_changes(report)
+    print("Affected entries:", [change.entry_id for change in changes])
+    publish_results(document_root, produce_results(changes, author))
+    tracker.commit(
+        message="documentation synchronized",
+        expected_revision=report.working_revision,
+        expected_baseline_revision=report.baseline_revision,
     )
 
 
-def run_vba_demo(project_root: Path) -> None:
-    """Create sample VBA sources and run initial and incremental syncs."""
-    source_root = project_root / "src"
-    document_root = project_root / "published"
-    source_root.mkdir()
-    document_root.mkdir()
-    write(
-        source_root,
-        "frmOrder.frm",
-        "Private Sub bSave_Click()\n"
-        "    Call CheckPermission\n"
-        "    Call SaveOrder\n"
-        "End Sub\n\n"
-        "Private Sub bCancel_Click()\n"
-        "    Call CheckPermission\n"
-        "End Sub\n",
-    )
-    write(
-        source_root,
-        "modBusiness.bas",
-        "Public Sub CheckPermission()\n"
-        "    result = 1\n"
-        "End Sub\n\n"
-        "Public Sub SaveOrder()\n"
-        "End Sub\n",
-    )
-
-    lifecycle = create_vba_lifecycle(source_root, document_root)
-    initial = lifecycle.synchronize()
-    print_plans("DOCUMENT SYNCHRONIZATION (INITIAL)", initial.plans)
-
-    write(
-        source_root,
-        "modBusiness.bas",
-        "Public Sub CheckPermission()\n"
-        "    result = 2\n"
-        "End Sub\n\n"
-        "Public Sub SaveOrder()\n"
-        "End Sub\n",
-    )
-
-    update = lifecycle.synchronize()
-    print_plans("\nDOCUMENT SYNCHRONIZATION (UPDATE)", update.plans)
-
-    print("\nSOURCE DOCUMENTS (FINAL)")
-    for path in sorted((document_root / "docs").rglob("*.md")):
-        print(f"  {path.relative_to(document_root)}")
-        print(path.read_text(encoding="utf-8"))
+def write_source(root: Path, name: str, content: str) -> None:
+    path = root / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
 
 
 def main() -> None:
     with tempfile.TemporaryDirectory() as directory:
-        run_vba_demo(Path(directory))
+        project_root = Path(directory)
+        source_root = project_root / "src"
+        document_root = project_root / "published"
+        source_root.mkdir()
+        document_root.mkdir()
+
+        write_source(
+            source_root,
+            "frmOrder.frm",
+            "Private Sub bSave_Click()\n"
+            "    Call ValidateOrder\n"
+            "End Sub\n",
+        )
+        write_source(
+            source_root,
+            "modOrder.bas",
+            "Public Sub ValidateOrder()\n"
+            "    result = 1\n"
+            "End Sub\n",
+        )
+        tracker = FileTracker(str(source_root))
+        tracker.commit(message="initial source baseline")
+        author = LlmDocumentAuthor(XmlPromptRenderer(), DemoLlmClient())
+
+        print("== Generate a fragment after a dependency change ==")
+        write_source(
+            source_root,
+            "modOrder.bas",
+            "Public Sub ValidateOrder()\n"
+            "    result = 2\n"
+            "End Sub\n",
+        )
+        synchronize(source_root, document_root, tracker, author)
+        document = document_root / "docs" / "frmOrder.md"
+        print(document.relative_to(document_root))
+        print(document.read_text(encoding="utf-8"))
+
+        print("== Remove the Entry and its fragment ==")
+        (source_root / "frmOrder.frm").unlink()
+        synchronize(source_root, document_root, tracker, author)
+        print("Document exists:", document.exists())
 
 
 if __name__ == "__main__":

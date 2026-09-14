@@ -3,10 +3,14 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "document-updater"
+name = "document-author"
 version = "0.1.0"
-description = "Apply deterministic document fragment results to Markdown."
+description = "Render structured authoring requests through an LLM."
 requires-python = ">=3.10"
+dependencies = ["document-updater"]
+
+[tool.uv.sources]
+document-updater = { workspace = true }
 
 [tool.setuptools]
 package-dir = {"" = "src"}
