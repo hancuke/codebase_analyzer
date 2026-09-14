@@ -151,9 +151,19 @@ context = build_llm_context(
 
 这保证 LLM 只更新当前入口，不会重新解释或改写同文件中的其他入口。
 
+`LlmEntryContext` 表示稳定的单入口事实输入，并不限制调用方只能发起一次 LLM 请求。如果需要从行为、
+变更影响、风险等不同角度分析，可以在调用方适配器中对同一个 context 执行多个命名 prompt，再把这些
+中间分析和同一份 reference data 交给最终综合 prompt。综合步骤仍只返回一个当前入口的 Markdown
+正文，因此 `EntryDocumentResult`、文档合并和发布流程都无需改变。
+
+`examples/llm_client.py` 中的 `MultiPromptEntryDocumentAuthor` 演示了这一模式。它与单 prompt
+author 一样提供 `author(context) -> str`，可直接作为 `author_entry_documents()` 的
+`content_for` 参数。分析 prompt 按配置顺序执行，任一调用失败都会立即传播异常，不会用部分结果生成
+文档。
+
 ### 2.5 保存 LLM 结果
 
-每次 LLM 调用的结果包装为：
+每个入口最终生成的结果包装为：
 
 ```python
 EntryDocumentResult(
@@ -469,10 +479,12 @@ from document_updater import (
     resolve_document_targets,
 )
 
-store = LocalDocumentStore(project_root)
-targets = resolve_document_targets(plans)
+source_root = project_root / "src"
+document_store = LocalDocumentStore(project_root / "published")
+docs_root = "docs"
+targets = resolve_document_targets(plans, docs_root=docs_root)
 targets_by_source = {target.source_id: target for target in targets}
-existing_documents = store.load(targets)
+existing_documents = document_store.load(targets)
 
 results = []
 for plan in plans:
@@ -511,12 +523,15 @@ sync_plan = build_document_sync_plan(
     plans,
     results,
     existing_documents,
+    docs_root=docs_root,
 )
-store.apply(sync_plan)
+document_store.apply(sync_plan)
 ```
 
-实际调用方可以在生成 prompt 前建立更直接的 `entry_id -> SourceDocumentTarget` 索引；关键约束是
-读取、构建 sync plan 时使用同一套 `source_id` 和 `docs_root`。
+实际调用方可以在生成 prompt 前建立更直接的 `entry_id -> SourceDocumentTarget` 索引。源码扫描的
+`source_root`、文档 store 的物理 workspace root 和逻辑 `docs_root` 是三个不同概念；关键约束是
+读取、构建 sync plan 时使用同一套 `source_id` 和 `docs_root`，并且发布不会隐式推进
+`FileTracker` baseline。
 
 ## 8. 失败与恢复
 

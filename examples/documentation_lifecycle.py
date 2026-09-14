@@ -1,9 +1,9 @@
 # Example: one documentation synchronization flow for initial and later runs.
 #
 # An empty FileTracker baseline makes every discovered entry a CREATE plan.
-# After a successful synchronization, the baseline is committed. Later runs
-# compare against that baseline and automatically produce UPDATE or ARCHIVE
-# plans as appropriate; callers never classify forms themselves.
+# An existing baseline automatically produces UPDATE or ARCHIVE plans as
+# appropriate; callers never classify forms themselves. Advancing the
+# FileTracker baseline is intentionally owned by a separate caller workflow.
 
 from __future__ import annotations
 
@@ -11,10 +11,11 @@ import tempfile
 from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 
-from change_analyzer import analyze_changes
+from change_analyzer import ImpactReport, analyze_changes
 from codegraph import SourceFile, VbaAnalyzer
 from document_updater import (
     DocumentAction,
+    DocumentSyncPlan,
     EntryDocumentResult,
     LocalDocumentStore,
     SourceDocumentTarget,
@@ -26,6 +27,28 @@ from document_updater import (
 )
 from document_updater.models import EntryUpdatePlan, LlmEntryContext
 from filetracker import FileTracker
+
+from llm_client import (
+    EntryAnalysisPrompt,
+    MockLlmClient,
+    MultiPromptEntryDocumentAuthor,
+)
+
+
+BEHAVIOR_ANALYSIS_PROMPT = """\
+Analyze the entry point's externally observable behavior, control flow, and key dependencies.
+Return concise findings for another technical writer; do not write the final document.
+
+{{ reference_data }}
+"""
+
+CHANGE_ANALYSIS_PROMPT = """\
+Analyze how the supplied changes affect this entry point and identify documentation risks,
+including obsolete statements in the existing document.
+Return concise findings for another technical writer; do not write the final document.
+
+{{ reference_data }}
+"""
 
 
 def write(root: Path, name: str, content: str) -> None:
@@ -58,6 +81,30 @@ def entry_source_id(plan: EntryUpdatePlan) -> str:
     raise ValueError(f"entry {plan.entry_id!r} is missing from its context")
 
 
+def analyze_source_changes(
+    source_root: Path,
+    tracker: FileTracker,
+) -> ImpactReport:
+    """Build an impact report from the tracked source snapshot."""
+    change_set = tracker.scan()
+    return analyze_changes(
+        change_set,
+        sources(source_root),
+        [VbaAnalyzer()],
+    )
+
+
+def load_document_state(
+    plans: Iterable[EntryUpdatePlan],
+    store: LocalDocumentStore,
+    *,
+    docs_root: str,
+) -> tuple[tuple[SourceDocumentTarget, ...], dict[str, str]]:
+    """Resolve source targets and load their current documents."""
+    targets = resolve_document_targets(plans, docs_root=docs_root)
+    return targets, store.load(targets)
+
+
 def author_entry_documents(
     plans: Iterable[EntryUpdatePlan],
     targets: Iterable[SourceDocumentTarget],
@@ -65,7 +112,7 @@ def author_entry_documents(
     *,
     content_for: Callable[[LlmEntryContext], str],
 ) -> tuple[EntryDocumentResult, ...]:
-    """Call the LLM once for each CREATE or UPDATE plan."""
+    """Generate one document result for each CREATE or UPDATE plan."""
     target_by_source = {target.source_id: target for target in targets}
     results: list[EntryDocumentResult] = []
     for plan in plans:
@@ -86,30 +133,21 @@ def author_entry_documents(
     return tuple(results)
 
 
-def synchronize_documents(
-    root: Path,
-    tracker: FileTracker,
+def apply_document_sync_plan(
     store: LocalDocumentStore,
-    *,
-    content_for: Callable[[LlmEntryContext], str],
-) -> tuple[EntryUpdatePlan, ...]:
-    """Synchronize documentation for both an empty and an existing baseline."""
-    change_set = tracker.scan()
-    report = analyze_changes(change_set, sources(root), [VbaAnalyzer()])
-    plans = create_entry_plans(report)
-    targets = resolve_document_targets(plans)
-    existing_documents = store.load(targets)
-    results = author_entry_documents(
-        plans, targets, existing_documents, content_for=content_for
-    )
-    sync_plan = build_document_sync_plan(plans, results, existing_documents)
+    sync_plan: DocumentSyncPlan,
+) -> None:
+    """Apply a validated document mutation plan."""
     store.apply(sync_plan)
-    tracker.commit(
-        message="documentation synchronized",
-        expected_revision=change_set.working_revision,
-        expected_baseline_revision=change_set.baseline_revision,
-    )
-    return plans
+
+
+def analyze_document_changes(
+    source_root: Path,
+    tracker: FileTracker,
+) -> tuple[EntryUpdatePlan, ...]:
+    """Return entry-scoped document plans for the current source changes."""
+    report = analyze_source_changes(source_root, tracker)
+    return create_entry_plans(report)
 
 
 def print_plans(title: str, plans: Iterable[EntryUpdatePlan]) -> None:
@@ -119,9 +157,13 @@ def print_plans(title: str, plans: Iterable[EntryUpdatePlan]) -> None:
 
 
 with tempfile.TemporaryDirectory() as directory:
-    root = Path(directory)
+    project_root = Path(directory)
+    source_root = project_root / "src"
+    document_root = project_root / "published"
+    source_root.mkdir()
+    document_root.mkdir()
     write(
-        root,
+        source_root,
         "frmOrder.frm",
         "Private Sub bSave_Click()\n"
         "    Call CheckPermission\n"
@@ -132,7 +174,7 @@ with tempfile.TemporaryDirectory() as directory:
         "End Sub\n",
     )
     write(
-        root,
+        source_root,
         "modBusiness.bas",
         "Public Sub CheckPermission()\n"
         "    result = 1\n"
@@ -144,7 +186,7 @@ with tempfile.TemporaryDirectory() as directory:
     # Track source inputs only. Publishing docs must not invalidate the
     # revision captured immediately before this synchronization run.
     tracker = FileTracker(
-        str(root),
+        str(source_root),
         exclude_patterns=[
             "docs",
             "**/docs/**",
@@ -152,42 +194,78 @@ with tempfile.TemporaryDirectory() as directory:
             "**/.codegraph-reviews/**",
         ],
     )
-    store = LocalDocumentStore(root)
+    store = LocalDocumentStore(document_root)
 
-    initial_plans = synchronize_documents(
-        root,
-        tracker,
-        store,
-        content_for=lambda context: (
-            f"Initial documentation for `{context.plan.entry_id}`."
+    llm_client = MockLlmClient()
+    author = MultiPromptEntryDocumentAuthor(
+        client=llm_client,
+        analysis_prompts=(
+            EntryAnalysisPrompt(
+                name="behavior",
+                template=BEHAVIOR_ANALYSIS_PROMPT,
+            ),
+            EntryAnalysisPrompt(
+                name="change-impact",
+                template=CHANGE_ANALYSIS_PROMPT,
+            ),
         ),
     )
-    print_plans("INITIAL SYNCHRONIZATION", initial_plans)
 
+    plans = analyze_document_changes(source_root, tracker)
+    targets, existing_documents = load_document_state(
+        plans,
+        store,
+        docs_root="docs",
+    )
+    results = author_entry_documents(
+        plans,
+        targets,
+        existing_documents,
+        content_for=author.author,
+    )
+    sync_plan = build_document_sync_plan(
+        plans,
+        results,
+        existing_documents,
+        docs_root="docs",
+    )
+    apply_document_sync_plan(store, sync_plan)
+    print_plans("DOCUMENT SYNCHRONIZATION (INITIAL)", plans)
+
+    # Commit baseline and simulate an update
+    tracker.commit()
     write(
-        root,
+        source_root,
         "modBusiness.bas",
         "Public Sub CheckPermission()\n"
         "    result = 2\n"
         "End Sub\n\n"
         "Public Sub SaveOrder()\n"
-        "    Call AuditOrder\n"
-        "End Sub\n\n"
-        "Public Sub AuditOrder()\n"
         "End Sub\n",
     )
 
-    update_plans = synchronize_documents(
-        root,
-        tracker,
+    update_plans = analyze_document_changes(source_root, tracker)
+    update_targets, existing_documents = load_document_state(
+        update_plans,
         store,
-        content_for=lambda context: (
-            f"Updated documentation for `{context.plan.entry_id}`."
-        ),
+        docs_root="docs",
     )
-    print_plans("\nUPDATE SYNCHRONIZATION", update_plans)
+    update_results = author_entry_documents(
+        update_plans,
+        update_targets,
+        existing_documents,
+        content_for=author.author,
+    )
+    update_sync_plan = build_document_sync_plan(
+        update_plans,
+        update_results,
+        existing_documents,
+        docs_root="docs",
+    )
+    apply_document_sync_plan(store, update_sync_plan)
+    print_plans("\nDOCUMENT SYNCHRONIZATION (UPDATE)", update_plans)
 
-    print("\nSOURCE DOCUMENTS")
-    for path in sorted((root / "docs").rglob("*.md")):
-        print(f"  {path.relative_to(root)}")
+    print("\nSOURCE DOCUMENTS (FINAL)")
+    for path in sorted((document_root / "docs").rglob("*.md")):
+        print(f"  {path.relative_to(document_root)}")
         print(path.read_text(encoding="utf-8"))
