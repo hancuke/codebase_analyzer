@@ -110,6 +110,7 @@ class LlmDocumentAuthor:
 
     def author(self, request: AuthorRequest) -> DocumentResult:
         prompt = self.renderer.render(request)
+        print(prompt.user_prompt)
         markdown = _sanitize_markdown(prompt, self.client)
         return DocumentResult(
             fragment_id=request.fragment_id,

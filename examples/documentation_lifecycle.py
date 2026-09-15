@@ -10,13 +10,15 @@ from __future__ import annotations
 
 import tempfile
 from collections import defaultdict
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
 
 from change_analyzer import EntryChange, analyze_changes, entry_changes
 from codegraph import SourceFile, VbaAnalyzer
 from document_updater import (
     AuthorRequest,
+    DocumentAuthor,
     DocumentResult,
     FilePromptRenderer,
     LlmDocumentAuthor,
@@ -44,6 +46,64 @@ class DemoLlmClient:
         )
 
 
+@dataclass(frozen=True)
+class EntryDocumentationPolicy:
+    """Map entry-scoped code facts to caller-owned document artifacts."""
+
+    metadata: PromptMetadata
+
+    def fragment_id(self, change: EntryChange) -> str:
+        return f"entry:{change.entry_id}"
+
+    def document_key(self, change: EntryChange) -> DocumentKey:
+        source_id = self._entry_source_id(change)
+        if source_id is None:
+            raise ValueError(f"entry {change.entry_id!r} is missing from both contexts")
+        return f"docs/{Path(source_id).with_suffix('.md')}"
+
+    def author_request(self, change: EntryChange) -> AuthorRequest:
+        return AuthorRequest(
+            fragment_id=self.fragment_id(change),
+            blocks=(
+                PromptBlock("entry_id", change.entry_id),
+                PromptBlock("code_context", self._code_context(change)),
+                PromptBlock(
+                    "function_changes",
+                    "\n".join(item.diff for item in change.function_changes),
+                ),
+            ),
+            metadata=self.metadata,
+        )
+
+    def result_for(
+        self,
+        change: EntryChange,
+        author: DocumentAuthor,
+    ) -> tuple[DocumentKey, DocumentResult]:
+        if change.new_entry is None:
+            result = DocumentResult(self.fragment_id(change), ResultKind.DELETE)
+        else:
+            result = author.author(self.author_request(change))
+        return self.document_key(change), result
+
+    def _code_context(self, change: EntryChange) -> str:
+        return "\n\n".join(
+            function.source
+            for context in (change.old_context, change.new_context)
+            if context is not None
+            for function in context.functions
+        )
+
+    def _entry_source_id(self, change: EntryChange) -> str | None:
+        for context in (change.new_context, change.old_context):
+            if context is None:
+                continue
+            for function in context.functions:
+                if function.id == change.entry_id:
+                    return function.source_id
+        return None
+
+
 def load_vba_sources(source_root: Path) -> tuple[SourceFile, ...]:
     """Load the complete current source snapshot required by change_analyzer."""
     return tuple(
@@ -56,83 +116,31 @@ def load_vba_sources(source_root: Path) -> tuple[SourceFile, ...]:
     )
 
 
-def request_for_entry(change: EntryChange) -> AuthorRequest:
-    """The application selects the Entry facts it exposes to the author."""
-    context = "\n\n".join(
-        function.source
-        for analysis_context in (change.old_context, change.new_context)
-        if analysis_context is not None
-        for function in analysis_context.functions
-    )
-    return AuthorRequest(
-        fragment_id=fragment_id_for(change),
-        blocks=(
-            PromptBlock("entry_id", change.entry_id),
-            PromptBlock("code_context", context),
-            PromptBlock(
-                "function_changes",
-                "\n".join(item.diff for item in change.function_changes),
-            ),
-        ),
-        metadata=PromptMetadata(
-            project="Order System",
-            language="VBA",
-            glossary=(
-                "- Entry: a documentation entry point.\n"
-                "- Fragment: a managed Markdown section."
-            ),
-        ),
-    )
+@dataclass(frozen=True)
+class DocumentPublisher:
+    """Apply grouped fragment results and persist the caller's documents."""
 
+    root: Path
 
-def fragment_id_for(change: EntryChange) -> str:
-    return f"entry:{change.entry_id}"
+    def publish(self, results: Iterable[tuple[DocumentKey, DocumentResult]]) -> None:
+        by_document: dict[DocumentKey, list[DocumentResult]] = defaultdict(list)
+        for key, result in results:
+            by_document[key].append(result)
 
+        for key in sorted(by_document):
+            self._publish_document(key, by_document[key])
 
-def document_key_for(change: EntryChange) -> DocumentKey:
-    """Caller policy: Entries from one source file share one Markdown document."""
-    for context in (change.new_context, change.old_context):
-        if context is None:
-            continue
-        for function in context.functions:
-            if function.id == change.entry_id:
-                return f"docs/{Path(function.source_id).with_suffix('.md')}"
-    raise ValueError(f"entry {change.entry_id!r} is missing from both contexts")
-
-
-def produce_results(
-    changes: Iterable[EntryChange],
-    author: LlmDocumentAuthor,
-) -> tuple[tuple[DocumentKey, DocumentResult], ...]:
-    """Map code facts to desired fragment states; deletion needs no LLM request."""
-    produced: list[tuple[DocumentKey, DocumentResult]] = []
-    for change in changes:
-        key = document_key_for(change)
-        if change.new_entry is None:
-            result = DocumentResult(fragment_id_for(change), ResultKind.DELETE)
-        else:
-            result = author.author(request_for_entry(change))
-        produced.append((key, result))
-    return tuple(produced)
-
-
-def publish_results(
-    document_root: Path,
-    results: Iterable[tuple[DocumentKey, DocumentResult]],
-) -> None:
-    """Caller-owned grouping, physical I/O, and physical-file deletion policy."""
-    by_document: dict[DocumentKey, list[DocumentResult]] = defaultdict(list)
-    for key, result in results:
-        by_document[key].append(result)
-
-    for key in sorted(by_document):
-        path = document_root / key
+    def _publish_document(
+        self,
+        key: DocumentKey,
+        results: Iterable[DocumentResult],
+    ) -> None:
+        path = self.root / key
         markdown = path.read_text(encoding="utf-8") if path.exists() else ""
-        for result in by_document[key]:
+        for result in results:
             markdown = apply_result(markdown, result).markdown
 
-        # This policy deletes a file only when it has no managed fragments and
-        # no caller-owned Markdown. Different callers can choose differently.
+        # Delete only empty managed documents; caller-owned Markdown is retained.
         if not markdown.strip():
             path.unlink(missing_ok=True)
         else:
@@ -154,7 +162,18 @@ def synchronize(
     )
     changes = entry_changes(report)
     print("Affected entries:", [change.entry_id for change in changes])
-    publish_results(document_root, produce_results(changes, author))
+    policy = EntryDocumentationPolicy(
+        metadata=PromptMetadata(
+            project="Order System",
+            language="VBA",
+            glossary=(
+                "- Entry: a documentation entry point.\n"
+                "- Fragment: a managed Markdown section."
+            ),
+        ),
+    )
+    results = tuple(policy.result_for(change, author) for change in changes)
+    DocumentPublisher(document_root).publish(results)
     tracker.commit(
         message="documentation synchronized",
         expected_revision=report.working_revision,
