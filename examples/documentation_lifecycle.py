@@ -12,17 +12,17 @@ import tempfile
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
 from pathlib import Path
-from xml.etree import ElementTree
 
 from change_analyzer import EntryChange, analyze_changes, entry_changes
 from codegraph import SourceFile, VbaAnalyzer
 from document_updater import (
     AuthorRequest,
     DocumentResult,
+    FilePromptRenderer,
     LlmDocumentAuthor,
     PromptBlock,
+    PromptMetadata,
     ResultKind,
-    XmlPromptRenderer,
 )
 from document_updater import apply_result
 from filetracker import FileTracker
@@ -34,13 +34,10 @@ DocumentKey = str
 class DemoLlmClient:
     """A deterministic stand-in for a real LLM provider adapter."""
 
-    def generate(self, prompt: str) -> str:
-        root = ElementTree.fromstring(prompt)
-        entry_id = next(
-            block.text
-            for block in root.findall("blocks/block")
-            if block.get("name") == "entry_id"
-        )
+    def generate(self, system_prompt: str, user_prompt: str) -> str:
+        entry_id = user_prompt.split("<Context_entry_id>\n", 1)[1].split(
+            "\n</Context_entry_id>", 1
+        )[0]
         return (
             f"## {entry_id.rsplit(':', 1)[-1]}\n\n"
             f"This generated fragment documents `{entry_id}`."
@@ -69,16 +66,20 @@ def request_for_entry(change: EntryChange) -> AuthorRequest:
     )
     return AuthorRequest(
         fragment_id=fragment_id_for(change),
-        instructions=(
-            "Write a concise Markdown fragment for this entry. "
-            "Do not include structural codegraph markers."
-        ),
         blocks=(
             PromptBlock("entry_id", change.entry_id),
             PromptBlock("code_context", context),
             PromptBlock(
                 "function_changes",
                 "\n".join(item.diff for item in change.function_changes),
+            ),
+        ),
+        metadata=PromptMetadata(
+            project="Order System",
+            language="VBA",
+            glossary=(
+                "- Entry: a documentation entry point.\n"
+                "- Fragment: a managed Markdown section."
             ),
         ),
     )
@@ -191,7 +192,13 @@ def main() -> None:
         )
         tracker = FileTracker(str(source_root))
         tracker.commit(message="initial source baseline")
-        author = LlmDocumentAuthor(XmlPromptRenderer(), DemoLlmClient())
+        author = LlmDocumentAuthor(
+            FilePromptRenderer(
+                Path(__file__).with_name("system_prompt.txt"),
+                Path(__file__).with_name("user_prompt.template"),
+            ),
+            DemoLlmClient(),
+        )
 
         print("== Generate a fragment after a dependency change ==")
         write_source(

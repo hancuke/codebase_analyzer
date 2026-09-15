@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
+from string import Template
 from typing import Protocol
-from xml.etree import ElementTree
 
 from .documents import DocumentResult, ResultKind
 
@@ -20,12 +21,27 @@ class PromptBlock:
 
 
 @dataclass(frozen=True)
+class PromptMetadata:
+    """Request-scoped metadata available to the system prompt template."""
+
+    project: str
+    language: str
+    glossary: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.project.strip():
+            raise ValueError("prompt metadata project must not be empty")
+        if not self.language.strip():
+            raise ValueError("prompt metadata language must not be empty")
+
+
+@dataclass(frozen=True)
 class AuthorRequest:
     """All context required to produce one document fragment."""
 
     fragment_id: str
-    instructions: str
     blocks: tuple[PromptBlock, ...]
+    metadata: PromptMetadata
 
     def __post_init__(self) -> None:
         names = tuple(block.name for block in self.blocks)
@@ -33,15 +49,23 @@ class AuthorRequest:
             raise ValueError("prompt block names must be unique")
 
 
+@dataclass(frozen=True)
+class RenderedPrompt:
+    """The two provider message roles produced from one authoring request."""
+
+    system_prompt: str
+    user_prompt: str
+
+
 class PromptRenderer(Protocol):
-    def render(self, request: AuthorRequest) -> str:
-        """Render one complete provider prompt."""
+    def render(self, request: AuthorRequest) -> RenderedPrompt:
+        """Render provider system and user prompts."""
         ...
 
 
 class LlmClient(Protocol):
-    def generate(self, prompt: str) -> str:
-        """Generate Markdown from one complete prompt."""
+    def generate(self, system_prompt: str, user_prompt: str) -> str:
+        """Generate Markdown from provider system and user prompts."""
         ...
 
 
@@ -52,19 +76,29 @@ class DocumentAuthor(Protocol):
 
 
 @dataclass(frozen=True)
-class XmlPromptRenderer:
-    """A deterministic default renderer for structured prompt blocks."""
+class FilePromptRenderer:
+    """Render system and user prompts from separate caller-owned files."""
 
-    def render(self, request: AuthorRequest) -> str:
-        root = ElementTree.Element("author_request")
-        instructions = ElementTree.SubElement(root, "instructions")
-        instructions.text = request.instructions
-        blocks = ElementTree.SubElement(root, "blocks")
-        for block in request.blocks:
-            element = ElementTree.SubElement(blocks, "block", {"name": block.name})
-            element.text = block.content
-        ElementTree.indent(root, space="  ")
-        return ElementTree.tostring(root, encoding="unicode") + "\n"
+    system_prompt_path: Path
+    user_prompt_path: Path
+
+    def render(self, request: AuthorRequest) -> RenderedPrompt:
+        contexts = "\n\n".join(
+            f"<Context_{block.name}>\n{block.content}\n</Context_{block.name}>"
+            for block in request.blocks
+        )
+        return RenderedPrompt(
+            system_prompt=Template(
+                self.system_prompt_path.read_text(encoding="utf-8")
+            ).substitute(
+                project=request.metadata.project,
+                language=request.metadata.language,
+                glossary=request.metadata.glossary,
+            ),
+            user_prompt=Template(
+                self.user_prompt_path.read_text(encoding="utf-8")
+            ).substitute(contexts=contexts),
+        )
 
 
 @dataclass(frozen=True)
@@ -75,7 +109,8 @@ class LlmDocumentAuthor:
     client: LlmClient
 
     def author(self, request: AuthorRequest) -> DocumentResult:
-        markdown = _sanitize_markdown(self.renderer.render(request), self.client)
+        prompt = self.renderer.render(request)
+        markdown = _sanitize_markdown(prompt, self.client)
         return DocumentResult(
             fragment_id=request.fragment_id,
             kind=ResultKind.UPSERT,
@@ -83,8 +118,8 @@ class LlmDocumentAuthor:
         )
 
 
-def _sanitize_markdown(prompt: str, client: LlmClient) -> str:
-    markdown = client.generate(prompt).strip()
+def _sanitize_markdown(prompt: RenderedPrompt, client: LlmClient) -> str:
+    markdown = client.generate(prompt.system_prompt, prompt.user_prompt).strip()
     if markdown.startswith("```"):
         lines = markdown.splitlines()
         lines = lines[1:]

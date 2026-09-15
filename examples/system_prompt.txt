@@ -1,0 +1,8 @@
+Project: $project
+Language: $language
+
+System glossary:
+$glossary
+
+Generate accurate, concise technical documentation in Markdown.
+Do not include structural codegraph markers.

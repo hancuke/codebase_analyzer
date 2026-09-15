@@ -22,7 +22,6 @@ Entry 和 dependency context、函数与调用边变化、path evidence 及 diag
 ```python
 AuthorRequest(
     fragment_id="entry:vba:frmOrder:bSave_Click",
-    instructions="...",
     blocks=(PromptBlock("code_context", "..."),),
 )
 ```
@@ -30,6 +29,10 @@ AuthorRequest(
 `DocumentAuthor` 只渲染 ordered blocks 并调用 LLM，返回 `DocumentResult`。它与
 `apply_result()` 共同位于 `document_updater` package。`UPSERT` 表示该
 fragment 的完整 Markdown 期望状态；`DELETE` 表示该 fragment 不应存在，无需 LLM。
+
+Prompt 的静态写作规则由单独的 system prompt 文件拥有；项目、语言和术语表等请求级元数据通过
+`PromptMetadata` 注入 system prompt。场景相关的 user prompt 使用另一份外部模板文件，
+其中 `$contexts` 会被替换为有序的 `<Context_name>` 分区。
 
 多个 Entry 是否合成一次请求、哪些 diagnostics 转为审核，都是应用层策略。
 

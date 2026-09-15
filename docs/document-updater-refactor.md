@@ -112,8 +112,14 @@ class PromptBlock:
 @dataclass(frozen=True)
 class AuthorRequest:
     fragment_id: str
-    instructions: str
     blocks: tuple[PromptBlock, ...]
+    metadata: PromptMetadata
+
+@dataclass(frozen=True)
+class PromptMetadata:
+    project: str
+    language: str
+    glossary: str = ""
 
 class ResultKind(Enum):
     UPSERT = "upsert"
@@ -132,10 +138,16 @@ class DocumentAuthor(Protocol):
 
 `PromptBlock` 是唯一的 prompt context primitive。调用方可以用任意序列化格式填充 `content`（Markdown、XML、JSON 或纯文本）；作者只保证按请求中的顺序渲染。
 
+`FilePromptRenderer` 从两份外部文件读取 prompt：共享的 system prompt 文件和场景相关的 user
+prompt 模板文件。system prompt 可集中维护系统缩写、领域元数据和通用规则；user 模板通过
+`$contexts` 接收本次请求的动态上下文。
+
 `AuthorRequest` 的不变量：
 
 - `fragment_id` 非空且稳定，由调用方定义；
-- `instructions` 是本次 authoring 的完整行为要求；
+- `metadata.project` 和 `metadata.language` 非空；
+- system prompt 模板可使用 `$project`、`$language` 和 `$glossary`；
+- 静态写作规则由调用方提供的外部 prompt 模板拥有；
 - block 名称非空且在一次请求中唯一；
 - blocks 保持调用方顺序，不由 Author 重新排序；
 - 输入中不携带目标 Markdown 文件、物理路径或发布策略。
@@ -153,11 +165,11 @@ class DocumentAuthor(Protocol):
 
 ```python
 class PromptRenderer(Protocol):
-    def render(self, request: AuthorRequest) -> str:
+    def render(self, request: AuthorRequest) -> RenderedPrompt:
         ...
 
 class LlmClient(Protocol):
-    def generate(self, prompt: str) -> str:
+    def generate(self, system_prompt: str, user_prompt: str) -> str:
         ...
 ```
 

@@ -9,11 +9,13 @@ from .documents import (
 from .author import (
     AuthorRequest,
     DocumentAuthor,
+    FilePromptRenderer,
     LlmClient,
     LlmDocumentAuthor,
     PromptBlock,
+    PromptMetadata,
     PromptRenderer,
-    XmlPromptRenderer,
+    RenderedPrompt,
 )
 
 __all__ = [
@@ -21,13 +23,15 @@ __all__ = [
     "AuthorRequest",
     "DocumentAuthor",
     "DocumentResult",
+    "FilePromptRenderer",
     "InvalidDocumentResultError",
     "InvalidManagedDocumentError",
     "LlmClient",
     "LlmDocumentAuthor",
     "PromptBlock",
+    "PromptMetadata",
     "PromptRenderer",
+    "RenderedPrompt",
     "ResultKind",
-    "XmlPromptRenderer",
     "apply_result",
 ]
