@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "document-updater"
 version = "0.1.0"
-description = "Apply deterministic document fragment results to Markdown."
+description = "Author and apply deterministic document fragment results."
 requires-python = ">=3.10"
 
 [tool.setuptools]

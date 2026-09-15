@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Protocol
 from xml.etree import ElementTree
 
-from document_updater import DocumentResult, ResultKind
+from .documents import DocumentResult, ResultKind
 
 
 @dataclass(frozen=True)

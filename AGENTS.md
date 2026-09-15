@@ -42,7 +42,7 @@
 | `code_graph/` | 从完整源码快照提取函数、调用、入口和 diagnostics；验证并查询依赖图 | 文件系统遍历、Git/change tracking、文档更新、LLM 调用 |
 | `file_tracker/` | 跟踪物理文件变化、baseline transaction、内容快照和 revision 校验 | 解析语言语法、理解函数调用图、决定入口影响 |
 | `change_analyzer/` | 组合旧/新快照与 CodeGraph，计算函数变化、调用边变化和入口影响 | 修改 baseline、发布文档、执行 LLM |
-| `document_updater/` | 将入口影响转换为确定性文档计划、文档 mutation 和 LLM-ready context | 重新分析源码、推断代码依赖、拥有文件变更事实 |
+| `document_updater/` | 提供文档 authoring、确定性文档计划和 Markdown fragment mutation | 重新分析源码、推断代码依赖、拥有文件变更事实 |
 
 允许的高层依赖方向：
 

@@ -5,8 +5,7 @@
 | 领域 | 所有者 | 输入 | 输出 |
 | --- | --- | --- | --- |
 | 代码变更影响 | `change_analyzer` | ChangeSet、完整工作源码、analyzers | `EntryChange[]` |
-| 内容生成 | `document_author` | `AuthorRequest` | `DocumentResult` |
-| Markdown fragment 编辑 | `document_updater` | 一份 Markdown、一个 `DocumentResult` | `AppliedDocument` |
+| 文档内容生成与 fragment 编辑 | `document_updater` | `AuthorRequest` 或一份 Markdown与 `DocumentResult` | `DocumentResult` 或 `AppliedDocument` |
 
 ## EntryChange
 
@@ -28,7 +27,8 @@ AuthorRequest(
 )
 ```
 
-`DocumentAuthor` 只渲染 ordered blocks 并调用 LLM，返回 `DocumentResult`。`UPSERT` 表示该
+`DocumentAuthor` 只渲染 ordered blocks 并调用 LLM，返回 `DocumentResult`。它与
+`apply_result()` 共同位于 `document_updater` package。`UPSERT` 表示该
 fragment 的完整 Markdown 期望状态；`DELETE` 表示该 fragment 不应存在，无需 LLM。
 
 多个 Entry 是否合成一次请求、哪些 diagnostics 转为审核，都是应用层策略。

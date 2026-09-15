@@ -12,8 +12,7 @@ analyze_changes(...)
 ```
 
 调用方对 `fragment_id -> DocumentKey` 负责。这允许一 Entry 一 fragment、多 Entry 合成一个
-fragment，或多个 fragment 合并到一个文档，而不改变 `change_analyzer`、`document_author` 或
-`document_updater`。
+fragment，或多个 fragment 合并到一个文档，而不改变 `change_analyzer` 或 `document_updater`。
 
 只有所有 authoring、fragment 应用和物理发布成功后，调用方才能用 `ImpactReport` 的 revisions
 推进 FileTracker baseline。审核队列是调用方 workflow 状态，不是文档 mutation。

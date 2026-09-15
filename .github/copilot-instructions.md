@@ -7,7 +7,7 @@ This repository is a `uv` workspace containing four packages:
 - `code_graph/`: language-independent static analysis and dependency queries.
 - `file_tracker/`: immutable physical file changes and baseline transactions.
 - `change_analyzer/`: old/new CodeGraph comparison and entry-impact analysis.
-- `document_updater/`: entry-oriented document plans and LLM-ready contexts.
+- `document_updater/`: document authoring, entry-oriented plans, and Markdown fragment updates.
 
 The main flow is:
 

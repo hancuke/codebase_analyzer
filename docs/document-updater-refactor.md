@@ -22,7 +22,7 @@
 - 如何将一个片段插入、替换或删除，是 Markdown 片段编辑问题；
 - 路径、文件读写、重试、审核队列、baseline 推进是应用适配问题。
 
-这些问题不可由一个 `document_updater` façade 隐式解决。重构后，通过少量不可变值对象和纯函数显式组合它们。
+这些问题不可由一个隐藏应用策略的 façade 隐式解决。通过少量不可变值对象和纯函数显式组合它们。
 
 ## 2. 架构与依赖方向
 
@@ -40,11 +40,8 @@ file_tracker + code_graph
   ├─ DocumentResult 分组到 DocumentKey
   └─ storage adapter + baseline policy
             │
-            ├──────────────────────► document_author
-            │                         通用 prompt/LLM -> result
-            │
             └──────────────────────► document_updater
-                                      单文档 fragment 编辑
+                                      prompt/LLM + 单文档 fragment 编辑
 ```
 
 允许依赖：
@@ -55,11 +52,12 @@ file_tracker       code_graph
        change_analyzer
               |
  documentation_workflow
-       /                 \
-document_author     document_updater
+       |
+document_updater
 ```
 
-`document_author` 与 `document_updater` 不相互依赖。两者均不依赖 `change_analyzer`、`code_graph`、`file_tracker` 或任何 I/O adapter。
+`document_updater` 同时提供 authoring 与 fragment editing；它不依赖
+`change_analyzer`、`code_graph`、`file_tracker` 或任何 I/O adapter。
 
 > `documentation_workflow` 是调用方应用层的名称，不要求立即创建为 workspace package。示例、CLI、服务或未来的 orchestration package 均可承担该职责。只有存在两个以上独立调用方时，才将其提取为独立包。
 
@@ -195,7 +193,7 @@ def apply_result(
     """Apply one desired fragment state to one Markdown document."""
 ```
 
-为避免 `document_updater` 依赖 `document_author`，共享的 `ResultKind` 和 `DocumentResult` 应位于新的、极小的依赖零包 `document_model`，或保留在 `document_updater` 的 `model.py` 并由 `document_author` 依赖它。推荐后者，避免为两个类型引入额外 package：
+authoring 与 fragment editing 共享 `document_updater` 内的 `ResultKind` 和 `DocumentResult`，不引入额外 package：
 
 ```text
 document_updater.model
@@ -204,7 +202,7 @@ document_updater.model
 document_updater.fragments
   └─ AppliedDocument, apply_result()
 
-document_author
+document_updater.author
   └─ imports DocumentResult, ResultKind only
 ```
 
@@ -252,7 +250,7 @@ def analyze_changes(
 def entry_changes(report: ImpactReport) -> tuple[EntryChange, ...]: ...
 ```
 
-**禁止依赖**：`document_updater`、`document_author`、LLM provider、Markdown、文件写入。
+**禁止依赖**：`change_analyzer`、`codegraph`、`filetracker`、LLM provider、Markdown、文件写入。
 
 ### `document_updater`
 
@@ -280,7 +278,7 @@ class InvalidManagedDocumentError(ValueError): ...
 
 **禁止依赖**：`change_analyzer`、`codegraph`、`filetracker`、LLM、`Path`、路径映射、文件读取/写入、批量分组、Entry。
 
-### `document_author`
+### `document_updater` authoring API
 
 **能力**：将调用方提供的 prompt blocks 转为 LLM request，并将一份 LLM 输出转为一个 `DocumentResult.UPSERT`。
 
@@ -303,7 +301,8 @@ class LlmDocumentAuthor: ...
 
 **禁止依赖**：`change_analyzer`、`codegraph`、`filetracker`、文件系统、document path、文档合并/发布策略。
 
-`document_author` 可以先放在 `examples/` 或应用层，等其稳定并出现第二个消费者后再升格为 workspace package。不要把 provider 适配、prompt 策略和 fragment 编辑塞回 `document_updater`。
+provider 适配、prompt 策略和文档发布仍属于调用方；`document_updater` 只提供通用的
+authoring 协议和确定性 fragment 编辑。
 
 ### `documentation_workflow`（调用方应用层）
 
@@ -403,14 +402,14 @@ for key, results in group_by_document_key(results):
 
 1. 在 `change_analyzer` 增加 `EntryChange` 与 `entry_changes(report)`，以现有双图反向可达实现为唯一事实来源，并补充投影、删除、新增、共享依赖与 unassigned 的测试。
 2. 将 `DocumentResult`、`ResultKind` 和单文档 `apply_result()` 定义为 `document_updater` 仅有的领域核心；替换 section/batch/path 模型并为解析、UPSERT、DELETE、保留人工内容和幂等性建立测试。
-3. 将当前 `examples/llm_client.py` 改为通用 `document_author` 示例：以 `AuthorRequest`、`PromptBlock` 和 `DocumentResult` 为输入输出，移除 `LlmEntryContext`。
+3. 将当前 authoring 示例改为通用 `document_updater` API：以 `AuthorRequest`、`PromptBlock` 和 `DocumentResult` 为输入输出，移除 `LlmEntryContext`。
 4. 将 `examples/documentation_lifecycle.py` 改为 workflow 示例：将 `EntryChange` 显式转换成 request/result、按调用方规则映射并分组、逐个应用结果、最后发布与推进 baseline。
 5. 删除 `document_updater` 内所有 Entry、CodeGraph、LLM、文件系统和 target mapping 实现，清理 runtime workspace dependencies；同步改写 README 和领域文档。
 
 ## 8. 完成标准
 
 - `change_analyzer` 能只通过 `ImpactReport` 导出完整、确定性的 Entry 影响事实。
-- `document_author` 可由任意内容上下文驱动，且每次返回一个有效 `DocumentResult`。
+- `document_updater` 可由任意内容上下文驱动，且每次返回一个有效 `DocumentResult`。
 - `document_updater` 对单个结果进行纯、确定性、幂等的 fragment 更新，且没有其他 workspace package 依赖。
-- 应用层可以选择一 Entry 一 fragment、多个 Entry 一 fragment，或多个 fragment 一文档，而无需修改上述三个核心模块。
+- 应用层可以选择一 Entry 一 fragment、多个 Entry 一 fragment，或多个 fragment 一文档，而无需修改上述核心模块。
 - 文件路径、存储、LLM provider、审核和 baseline 均不会泄漏进核心模型或形成反向依赖。

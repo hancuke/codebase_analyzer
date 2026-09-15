@@ -8,7 +8,7 @@ FileTracker ChangeSet + complete source snapshot
   -> change_analyzer.analyze_changes()
   -> change_analyzer.entry_changes()
   -> caller-defined AuthorRequest
-  -> document_author.DocumentAuthor
+  -> document_updater.DocumentAuthor
   -> DocumentResult
   -> caller groups results by document
   -> document_updater.apply_result()
@@ -22,8 +22,7 @@ FileTracker ChangeSet + complete source snapshot
 | `code_graph/` | 从完整源码快照提取函数、调用、入口、diagnostics，并提供确定性图查询。 |
 | `file_tracker/` | 跟踪物理文件变化并维护 immutable baseline transaction。 |
 | `change_analyzer/` | 比较旧/新 CodeGraph，并将函数变更投影为具有双图路径证据的 `EntryChange`。 |
-| `document_updater/` | 将一个 fragment 的 desired state 纯函数式地应用到一份 Markdown。 |
-| `document_author/` | 将调用方提供的 prompt blocks 渲染并通过 LLM 生成一个 fragment result。 |
+| `document_updater/` | 将 prompt blocks 渲染并通过 LLM 生成 fragment result，同时将 desired state 纯函数式地应用到 Markdown。 |
 
 依赖保持单向：
 
@@ -33,12 +32,11 @@ file_tracker       code_graph
        change_analyzer
               |
       caller workflow
-       /           \
-document_author  document_updater
+              |
+      document_updater
 ```
 
-`document_author` 和 `document_updater` 不相互依赖；两者也不依赖代码分析、FileTracker、文件路径或
-文件系统。
+`document_updater` 不依赖代码分析、FileTracker、文件路径或文件系统。
 
 ## Minimal APIs
 
@@ -58,7 +56,7 @@ old/new path evidence。Entry 查找使用 baseline 和 working 两张图的反�
 ### Context to one document result
 
 ```python
-from document_author import AuthorRequest, LlmDocumentAuthor, PromptBlock
+from document_updater import AuthorRequest, LlmDocumentAuthor, PromptBlock
 
 request = AuthorRequest(
     fragment_id="entry:vba:frmOrder:bSave_Click",
@@ -107,7 +105,7 @@ Python 3.10+ 与 uv 是必需条件。
 
 ```bash
 uv sync --all-packages
-uv run pytest code_graph/tests file_tracker/tests change_analyzer/tests document_updater/tests document_author/tests
+uv run pytest code_graph/tests file_tracker/tests change_analyzer/tests document_updater/tests
 uv build --all-packages
 ```
 

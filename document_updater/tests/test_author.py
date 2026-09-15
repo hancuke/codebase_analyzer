@@ -1,10 +1,11 @@
-from document_author import (
+from document_updater import (
     AuthorRequest,
+    DocumentResult,
     LlmDocumentAuthor,
     PromptBlock,
+    ResultKind,
     XmlPromptRenderer,
 )
-from document_updater import ResultKind
 
 
 class RecordingClient:

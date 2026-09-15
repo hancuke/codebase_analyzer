@@ -16,13 +16,15 @@ from xml.etree import ElementTree
 
 from change_analyzer import EntryChange, analyze_changes, entry_changes
 from codegraph import SourceFile, VbaAnalyzer
-from document_author import (
+from document_updater import (
     AuthorRequest,
+    DocumentResult,
     LlmDocumentAuthor,
     PromptBlock,
+    ResultKind,
     XmlPromptRenderer,
 )
-from document_updater import DocumentResult, ResultKind, apply_result
+from document_updater import apply_result
 from filetracker import FileTracker
 
 
