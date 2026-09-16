@@ -6,6 +6,7 @@ from document_updater import (
     InvalidManagedDocumentError,
     ResultKind,
     apply_result,
+    get_fragment_markdown,
 )
 
 
@@ -14,47 +15,56 @@ def _upsert(fragment_id: str, markdown: str) -> DocumentResult:
 
 
 def test_upsert_inserts_then_replaces_one_fragment() -> None:
-    inserted = apply_result(
+    inserted_markdown = apply_result(
         "# Order\n\nHuman introduction.\n",
         _upsert("entry:save", "## Save\n\nOriginal."),
     )
-    replaced = apply_result(
-        inserted.markdown,
+    replaced_markdown = apply_result(
+        inserted_markdown,
         _upsert("entry:save", "## Save\n\nUpdated."),
     )
 
-    assert inserted.fragment_ids == ("entry:save",)
-    assert "Human introduction." in replaced.markdown
-    assert "Updated." in replaced.markdown
-    assert "Original." not in replaced.markdown
-    assert replaced.fragment_ids == ("entry:save",)
+    assert "Human introduction." in replaced_markdown
+    assert "Updated." in replaced_markdown
+    assert "Original." not in replaced_markdown
 
 
 def test_new_fragments_append_in_application_order() -> None:
-    first = apply_result("", _upsert("entry:first", "First"))
-    second = apply_result(first.markdown, _upsert("entry:second", "Second"))
+    first_markdown = apply_result("", _upsert("entry:first", "First"))
+    second_markdown = apply_result(
+        first_markdown,
+        _upsert("entry:second", "Second"),
+    )
 
-    assert second.fragment_ids == ("entry:first", "entry:second")
-    assert second.markdown.index("First") < second.markdown.index("Second")
+    assert second_markdown.index("First") < second_markdown.index("Second")
+
+
+def test_get_fragment_markdown_returns_one_managed_fragment() -> None:
+    document = apply_result(
+        "# Order\n",
+        _upsert("entry:save", "## Save\n\nSaves the order."),
+    )
+
+    assert get_fragment_markdown(document, "entry:save") == "## Save\n\nSaves the order."
+    assert get_fragment_markdown(document, "entry:missing") is None
 
 
 def test_delete_is_idempotent_and_preserves_human_content() -> None:
-    initial = apply_result(
+    initial_markdown = apply_result(
         "Introduction.\n",
         _upsert("entry:save", "Save documentation."),
-    ).markdown
-    deleted = apply_result(
-        initial,
+    )
+    deleted_markdown = apply_result(
+        initial_markdown,
         DocumentResult("entry:save", ResultKind.DELETE),
     )
-    repeated = apply_result(
-        deleted.markdown,
+    repeated_markdown = apply_result(
+        deleted_markdown,
         DocumentResult("entry:save", ResultKind.DELETE),
     )
 
-    assert deleted.fragment_ids == ()
-    assert deleted.markdown == "Introduction.\n"
-    assert not repeated.changed
+    assert deleted_markdown == "Introduction.\n"
+    assert repeated_markdown == deleted_markdown
 
 
 @pytest.mark.parametrize(

@@ -61,15 +61,6 @@ class DocumentResult:
 
 
 @dataclass(frozen=True)
-class AppliedDocument:
-    """The rendered Markdown after applying one fragment desired state."""
-
-    markdown: str
-    fragment_ids: tuple[str, ...]
-    changed: bool
-
-
-@dataclass(frozen=True)
 class _ManagedDocument:
     prefix: str
     fragments: tuple[DocumentResult, ...]
@@ -79,7 +70,7 @@ class _ManagedDocument:
 def apply_result(
     existing_markdown: str,
     result: DocumentResult,
-) -> AppliedDocument:
+) -> str:
     """Apply one fragment result to caller-selected Markdown."""
     document = _parse_document(existing_markdown)
     fragments = list(document.fragments)
@@ -104,11 +95,23 @@ def apply_result(
         fragments=tuple(fragments),
         suffix=document.suffix,
     )
-    markdown = _render_document(updated)
-    return AppliedDocument(
-        markdown=markdown,
-        fragment_ids=tuple(fragment.fragment_id for fragment in fragments),
-        changed=markdown != existing_markdown,
+    return _render_document(updated)
+
+
+def get_fragment_markdown(
+    existing_markdown: str,
+    fragment_id: str,
+) -> str | None:
+    """Return one managed fragment body, or None when it is not present."""
+    DocumentResult(fragment_id, ResultKind.DELETE)
+    document = _parse_document(existing_markdown)
+    return next(
+        (
+            fragment.markdown
+            for fragment in document.fragments
+            if fragment.fragment_id == fragment_id
+        ),
+        None,
     )
 
 

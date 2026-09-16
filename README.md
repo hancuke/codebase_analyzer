@@ -7,9 +7,7 @@
 FileTracker ChangeSet + complete source snapshot
   -> change_analyzer.analyze_changes()
   -> change_analyzer.entry_changes()
-  -> caller-defined AuthorRequest
-  -> document_updater.DocumentAuthor
-  -> DocumentResult
+  -> caller-generated DocumentResult
   -> caller groups results by document
   -> document_updater.apply_result()
   -> caller-owned storage and baseline commit
@@ -22,7 +20,7 @@ FileTracker ChangeSet + complete source snapshot
 | `code_graph/` | 从完整源码快照提取函数、调用、入口、diagnostics，并提供确定性图查询。 |
 | `file_tracker/` | 跟踪物理文件变化并维护 immutable baseline transaction。 |
 | `change_analyzer/` | 比较旧/新 CodeGraph，并将函数变更投影为具有双图路径证据的 `EntryChange`。 |
-| `document_updater/` | 将 prompt blocks 渲染并通过 LLM 生成 fragment result，同时将 desired state 纯函数式地应用到 Markdown。 |
+| `document_updater/` | 以纯函数方式读取和应用受管 Markdown fragment 的 desired state。 |
 
 依赖保持单向：
 
@@ -56,17 +54,17 @@ old/new path evidence。Entry 查找使用 baseline 和 working 两张图的反�
 ### Context to one document result
 
 ```python
-from document_updater import AuthorRequest, LlmDocumentAuthor, PromptBlock
+from document_updater import DocumentResult, ResultKind
 
-request = AuthorRequest(
+result = DocumentResult(
     fragment_id="entry:vba:frmOrder:bSave_Click",
-    instructions="Write concise technical documentation.",
-    blocks=(PromptBlock("code_context", rendered_context),),
+    kind=ResultKind.UPSERT,
+    markdown=generated_markdown,
 )
-result = author.author(request)
 ```
 
-`DocumentAuthor` 返回 `DocumentResult(kind=ResultKind.UPSERT, ...)`。删除的内容由调用方直接构造
+调用方拥有 prompt、LLM client 和 Markdown 合并策略，并生成一个
+`DocumentResult(kind=ResultKind.UPSERT, ...)`。删除的内容由调用方直接构造
 `DocumentResult(fragment_id, ResultKind.DELETE)`，无需调用 LLM。
 
 ### One result to one Markdown document
@@ -74,15 +72,21 @@ result = author.author(request)
 ```python
 from document_updater import apply_result
 
-applied = apply_result(existing_markdown, result)
+updated_markdown = apply_result(existing_markdown, result)
 ```
 
 受管内容采用 `codegraph:fragment` markers。UPSERT 在缺失时插入、存在时替换；DELETE 幂等删除。
-`AppliedDocument.fragment_ids` 仅报告剩余受管 fragment，物理文件是否应删除由调用方决定。
+物理文件是否应删除由调用方决定。
 
 调用方拥有 fragment 的来源、`fragment_id -> document key` 映射、分组、Markdown 加载/发布、审核队列
 与 FileTracker baseline 推进。支持一 Entry 一 fragment、多个 Entry 合成一个 fragment，或多个
 fragment 合并到一个文档。
+
+调用方可在读取目标 fragment 后构造不同 prompt：首次新增只发送当前 bounded code context，避免和
+`code_change`/diff 重复；更新才发送现有 fragment、当前代码和受限的变更摘要。需要小模型多角度
+分析时，调用方为同一 Entry 顺序执行 1..N 组 system/user prompts，并合并为唯一的
+`DocumentResult`，不会产生多份互相覆盖的 Entry fragment。UI 控件表格等确定性内容由独立
+producer 生成自己的 `DocumentResult`，可与 Entry fragment 共享同一 caller-owned document key。
 
 ## Runnable lifecycle example
 
@@ -94,7 +98,7 @@ uv run python examples/documentation_lifecycle.py
 
 1. 建立 VBA 源码 baseline；
 2. 修改一个被 Entry 调用的依赖，使用 `entry_changes()` 找到受影响 Entry；
-3. 将 Entry facts 转换为 `AuthorRequest`，并通过一个 deterministic mock LLM 生成 UPSERT result；
+3. 由调用方将 Entry facts 转换为 prompt，使用 deterministic mock LLM 生成一个 UPSERT result；
 4. 由调用方将 fragment 映射到 `docs/frmOrder.md`、调用 `apply_result()` 并写入文件；
 5. 删除 Entry，依据 old context 生成 DELETE result，并由调用方在文档为空时删除物理文件；
 6. 每次所有文档成功发布后才推进 FileTracker baseline。
