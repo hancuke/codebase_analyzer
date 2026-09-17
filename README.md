@@ -105,12 +105,11 @@ uv run python examples/changed_module_documentation.py
 UTF-16 读取，并只将 `CodeBehindForm` 行之后的 VBA 代码交给 CodeGraph；Module 支持 UTF-8
 或带 BOM 的 UTF-16。
 
-公共的加载、form 范围分析、文档生成与发布对象位于
+公共的加载、Form 范围分析、文档生成与发布对象位于
 [`documentation_example_support.py`](examples/documentation_example_support.py)。
-两个脚本都明确展示 `scan() -> form_source_ids_to_analyze()
--> affected_entries_for_form()
--> document_results_for_entries() -> publish() -> commit()`：每个 form 是一个文档的所有者，
-其受影响 Entry 只更新该 form 的文档；baseline 只在所有文档成功发布后由调用方推进。
+两个脚本都明确展示 `scan() -> affected_entries_by_form()
+-> publish_documents_for_forms() -> commit()`：每个 Form 是一个文档的所有者，
+其受影响 Entry 只更新该 Form 的文档；baseline 只在所有文档成功发布后由调用方推进。
 
 ## Setup and validation
 

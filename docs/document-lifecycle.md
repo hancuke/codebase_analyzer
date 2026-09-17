@@ -1,14 +1,11 @@
 # 文档生命周期
 
 ```text
-synchronize(...)
+example caller workflow
   1. FileTracker.scan()                  # read-only source revision
-  2. analyze_changes(...)                # baseline graph vs working graph
-  3. entry_changes(report)               # entry-scoped documentation facts
-  4. generate_entry_document(...)        # caller-owned prompts and LLM -> DocumentResult
-     + additional_results               # caller-generated UI tables, etc.
-  5. DocumentPublisher.publish(...)      # group both kinds of results and persist
-  6. FileTracker.commit(...)             # only after publication succeeds
+  2. affected_entries_by_form(...)       # analyze each affected Form
+  3. publish_documents_for_forms(...)    # generate, group, and persist results
+  4. FileTracker.commit(...)             # only after publication succeeds
 ```
 
 首次生成和后续更新使用同一条编排流程。第一次运行时 baseline manifest 不存在，`scan()` 将当前
@@ -28,8 +25,8 @@ producer 的分组、文件读写、审核和 baseline commit 都保留在调用
 
 | 对象 | 所有权与职责 |
 | --- | --- |
-| `synchronize()` | 普通编排函数；协调 scan、分析、生成、发布、commit，返回已有的 `ImpactReport` |
-| `entry_document_key()` | 示例的调用方路由规则；根据新／旧上下文选择目标文档，不生成内容 |
+| `affected_entries_by_form()` | 普通分析函数；按 Form 收集非空的受影响 `EntryChange`，不写入文件或推进 baseline |
+| `publish_documents_for_forms()` | 普通发布函数；按 Form 生成并发布 Entry 文档，返回实际改变的 document keys |
 | `generate_entry_document()` | 根据一个 `EntryChange` 读取 prompt 文件、依次调用 LLM，合并为一个 `DocumentResult` |
 | `generate_ui_document()` | 非 LLM 生成接口；输入完整 UI `SourceFile`，输出组件表格的 `DocumentResult`；提取逻辑由调用方实现 |
 | `LlmClient` | 稳定的文本生成适配器接口；具体模型、提示执行方式和 provider 可替换 |
@@ -51,13 +48,11 @@ producer 的分组、文件读写、审核和 baseline commit 都保留在调用
 ## Entry 生成参考实现
 
 ```python
-document_key = entry_document_key(change)
-fragment_id = f"entry:{change.entry_id}"
-result = generate_entry_document(
-    change,
-    fragment_id=fragment_id,
-    existing_markdown=publisher.read_fragment(document_key, fragment_id),
-    llm=client,
+changes_by_form = affected_entries_by_form(source_root, change_set)
+updated_document_keys = publish_documents_for_forms(
+    changes_by_form,
+    publisher,
+    client,
 )
 ```
 
@@ -86,17 +81,12 @@ UI 变化可能没有关联入口，需要调用方独立选择待处理的 UI �
 
 ```python
 ui_result = generate_ui_document(source, fragment_id="ui:frmOrder:components")
-synchronize(
-    source_root,
-    tracker,
-    publisher,
-    client,
-    additional_results={"docs/frmOrder.md": (ui_result,)},
-)
+document_key = "docs/frmOrder.md"
+publisher.publish(document_key, (ui_result,))
 ```
 
-`additional_results` 接收已经生成、已经确定文档归属的结果；调用方负责让这些结果对应本次
-源码快照。示例 `main()` 只演示 Entry 生命周期，不调用尚未实现的 UI 生成接口。
+调用方负责让这类额外结果对应本次源码快照，并以其 document key 调用同一个 publisher。
+示例 `main()` 只演示 Entry 生命周期，不调用尚未实现的 UI 生成接口。
 UI 源文件删除时，调用方直接创建相同 fragment ID 的 `DELETE`，无需把不存在的源码交给提取器。
 两个生成函数只共享输出类型，不需要共同的基类。
 

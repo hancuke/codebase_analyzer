@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -11,6 +11,19 @@ from change_analyzer import EntryChange, analyze_changes, entry_changes
 from codegraph import SourceFile, VbaAnalyzer
 from document_updater import DocumentResult, ResultKind, apply_result, get_fragment_markdown
 from filetracker import ChangeSet, ContentSnapshot, FileChange
+
+
+_FORM_FILE_GLOB = "Form_*.txt"
+_MODULE_FILE_GLOB = "Module_*.txt"
+_FORM_FILE_PREFIX = "form_"
+_MODULE_FILE_PREFIX = "module_"
+_VBA_EXPORT_SUFFIX = ".txt"
+_CODE_BEHIND_FORM_MARKER = "CodeBehindForm"
+_DOCUMENT_DIRECTORY = "docs"
+_PROMPT_FILE_PAIRS = (
+    ("business_flow.system.txt", "entry.user.template"),
+    ("boundaries.system.txt", "entry.user.template"),
+)
 
 
 class LlmClient(Protocol):
@@ -71,12 +84,8 @@ def generate_entry_document(
             f"\n\n<ChangeSummary>\n{summary}\n</ChangeSummary>"
         )
 
-    prompt_files = (
-        ("business_flow.system.txt", "entry.user.template"),
-        ("boundaries.system.txt", "entry.user.template"),
-    )
     prompts: list[tuple[str, str]] = []
-    for system_file, user_file in prompt_files:
+    for system_file, user_file in _PROMPT_FILE_PAIRS:
         system_prompt = (prompt_directory / system_file).read_text(
             encoding="utf-8"
         ).strip()
@@ -101,6 +110,9 @@ def generate_entry_document(
     )
 
 
+# Form impact analysis
+
+
 def form_source_ids_to_analyze(
     source_root: Path,
     change_set: ChangeSet,
@@ -117,7 +129,7 @@ def form_source_ids_to_analyze(
     ):
         form_source_ids.update(
             path.name
-            for path in source_root.glob("Form_*.txt")
+            for path in source_root.glob(_FORM_FILE_GLOB)
             if path.is_file()
         )
     return tuple(sorted(form_source_ids))
@@ -142,7 +154,7 @@ def affected_entries_for_form(
     if not context_changes.has_changes:
         return ()
 
-    working_paths = list(sorted(source_root.glob("Module_*.txt")))
+    working_paths = list(sorted(source_root.glob(_MODULE_FILE_GLOB)))
     form_path = source_root / form_source_id
     if form_path.is_file():
         working_paths.append(form_path)
@@ -168,25 +180,24 @@ def affected_entries_for_form(
     )
 
 
-def _decode_file_bytes(data: bytes) -> str:
-    """Robustly decode source bytes across UTF-16, UTF-8 (with or without BOM), and ANSI."""
-    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
-        try:
-            return data.decode("utf-16")
-        except UnicodeDecodeError:
-            pass
-    if data.startswith(b"\xef\xbb\xbf"):
-        try:
-            return data.decode("utf-8-sig")
-        except UnicodeDecodeError:
-            pass
+def affected_entries_by_form(
+    source_root: Path,
+    change_set: ChangeSet,
+) -> dict[str, tuple[EntryChange, ...]]:
+    """Collect non-empty Entry changes for each Form affected by this scan."""
+    changes_by_form = {}
+    for form_source_id in form_source_ids_to_analyze(source_root, change_set):
+        changes = affected_entries_for_form(
+            source_root,
+            change_set,
+            form_source_id,
+        )
+        if changes:
+            changes_by_form[form_source_id] = changes
+    return changes_by_form
 
-    for encoding in ("utf-8", "utf-16", "utf-16-le", "gbk", "cp1252"):
-        try:
-            return data.decode(encoding)
-        except (UnicodeDecodeError, LookupError):
-            continue
-    return data.decode("utf-8", errors="replace")
+
+# VBA export adaptation
 
 
 def _read_vba_source(path: Path) -> str:
@@ -213,6 +224,27 @@ def _vba_file_change(change: FileChange) -> FileChange:
     )
 
 
+def _decode_file_bytes(data: bytes) -> str:
+    """Robustly decode source bytes across UTF-16, UTF-8 (with or without BOM), and ANSI."""
+    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        try:
+            return data.decode("utf-16")
+        except UnicodeDecodeError:
+            pass
+    if data.startswith(b"\xef\xbb\xbf"):
+        try:
+            return data.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            pass
+
+    for encoding in ("utf-8", "utf-16", "utf-16-le", "gbk", "cp1252"):
+        try:
+            return data.decode(encoding)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return data.decode("utf-8", errors="replace")
+
+
 def _vba_content_snapshot(
     source_id: str,
     snapshot: ContentSnapshot,
@@ -233,7 +265,7 @@ def _vba_text_for_analysis(source_id: str, text: str) -> str:
 
     lines = text.splitlines(keepends=True)
     for index, line in enumerate(lines):
-        if line.strip() == "CodeBehindForm":
+        if line.strip() == _CODE_BEHIND_FORM_MARKER:
             return "".join(lines[index + 1 :])
     return ""
 
@@ -242,8 +274,8 @@ def _is_form_source(source_id: str) -> bool:
     path = Path(source_id)
     return (
         path.parent == Path(".")
-        and path.suffix.casefold() == ".txt"
-        and path.name.casefold().startswith("form_")
+        and path.suffix.casefold() == _VBA_EXPORT_SUFFIX
+        and path.name.casefold().startswith(_FORM_FILE_PREFIX)
     )
 
 
@@ -251,9 +283,12 @@ def _is_module_source(source_id: str) -> bool:
     path = Path(source_id)
     return (
         path.parent == Path(".")
-        and path.suffix.casefold() == ".txt"
-        and path.name.casefold().startswith("module_")
+        and path.suffix.casefold() == _VBA_EXPORT_SUFFIX
+        and path.name.casefold().startswith(_MODULE_FILE_PREFIX)
     )
+
+
+# Document publication
 
 
 @dataclass(frozen=True)
@@ -318,9 +353,29 @@ def document_results_for_entries(
     )
 
 
+def publish_documents_for_forms(
+    changes_by_form: Mapping[str, Iterable[EntryChange]],
+    publisher: DocumentPublisher,
+    llm: LlmClient,
+) -> tuple[str, ...]:
+    """Generate and publish each affected Form's Entry documentation."""
+    updated_document_keys = []
+    for form_source_id, changes in sorted(changes_by_form.items()):
+        document_key = document_key_for_form(form_source_id)
+        results = document_results_for_entries(
+            changes,
+            document_key,
+            publisher,
+            llm,
+        )
+        if publisher.publish(document_key, results):
+            updated_document_keys.append(document_key)
+    return tuple(updated_document_keys)
+
+
 def document_key_for_form(form_source_id: str) -> str:
     """Map a form source ID to the document owned by that form."""
-    return f"docs/{Path(form_source_id).with_suffix('.md').as_posix()}"
+    return f"{_DOCUMENT_DIRECTORY}/{Path(form_source_id).with_suffix('.md').as_posix()}"
 
 
 def write_source(

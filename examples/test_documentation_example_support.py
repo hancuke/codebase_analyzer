@@ -3,7 +3,11 @@ from pathlib import Path
 from documentation_example_support import (
     _read_vba_source,
     affected_entries_for_form,
+    affected_entries_by_form,
+    DemoLlmClient,
+    DocumentPublisher,
     form_source_ids_to_analyze,
+    publish_documents_for_forms,
     write_source,
 )
 from filetracker import FileTracker
@@ -98,3 +102,57 @@ def test_form_with_utf8_or_ansi_encoding_does_not_fail(tmp_path: Path) -> None:
         encoding="gbk",
     )
     assert _read_vba_source(tmp_path / "Form_2.txt") == "Private Sub Save_Click()\nEnd Sub\n"
+
+
+def test_affected_entries_by_form_includes_each_form_for_shared_module_change(
+    tmp_path: Path,
+) -> None:
+    _write_form(tmp_path)
+    write_source(
+        tmp_path,
+        "Form_2.txt",
+        "CodeBehindForm\n"
+        "Private Sub Cancel_Click()\n"
+        "    Call SharedWork\n"
+        "End Sub\n",
+    )
+    write_source(
+        tmp_path,
+        "Module_1.txt",
+        "Public Sub SharedWork()\n    result = 1\nEnd Sub\n",
+    )
+    tracker = FileTracker(str(tmp_path))
+    tracker.commit(message="baseline")
+    write_source(
+        tmp_path,
+        "Module_1.txt",
+        "Public Sub SharedWork()\n    result = 2\nEnd Sub\n",
+    )
+
+    changes_by_form = affected_entries_by_form(tmp_path, tracker.scan())
+
+    assert list(changes_by_form) == ["Form_1.txt", "Form_2.txt"]
+    assert all(changes_by_form.values())
+
+
+def test_publish_documents_for_forms_returns_changed_document_keys(
+    tmp_path: Path,
+) -> None:
+    _write_form(tmp_path)
+    write_source(
+        tmp_path,
+        "Module_1.txt",
+        "Public Sub SharedWork()\n    result = 1\nEnd Sub\n",
+    )
+    tracker = FileTracker(str(tmp_path))
+    changes_by_form = affected_entries_by_form(tmp_path, tracker.scan())
+    publisher = DocumentPublisher(tmp_path / "published")
+
+    updated_document_keys = publish_documents_for_forms(
+        changes_by_form,
+        publisher,
+        DemoLlmClient(),
+    )
+
+    assert updated_document_keys == ("docs/Form_1.md",)
+    assert (tmp_path / "published" / "docs" / "Form_1.md").exists()

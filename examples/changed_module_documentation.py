@@ -6,12 +6,10 @@ import tempfile
 from pathlib import Path
 
 from documentation_example_support import (
-    affected_entries_for_form,
+    affected_entries_by_form,
     DemoLlmClient,
     DocumentPublisher,
-    document_key_for_form,
-    document_results_for_entries,
-    form_source_ids_to_analyze,
+    publish_documents_for_forms,
     write_source,
 )
 from filetracker import FileTracker
@@ -50,30 +48,16 @@ def main() -> None:
         llm = DemoLlmClient()
 
         initial_change_set = tracker.scan()
-        initial_changes_by_form = {}
-        initial_form_source_ids = form_source_ids_to_analyze(
-            source_root, initial_change_set
+        initial_changes_by_form = affected_entries_by_form(
+            source_root,
+            initial_change_set,
         )
-        for form_source_id in initial_form_source_ids:
-            changes = affected_entries_for_form(
-                source_root,
-                initial_change_set,
-                form_source_id,
-            )
-            if changes:
-                initial_changes_by_form[form_source_id] = changes
         print("Initial forms to document:", list(initial_changes_by_form))
-        initial_document_keys = []
-        for form_source_id, changes in initial_changes_by_form.items():
-            document_key = document_key_for_form(form_source_id)
-            results = document_results_for_entries(
-                changes,
-                document_key,
-                publisher,
-                llm,
-            )
-            if publisher.publish(document_key, results):
-                initial_document_keys.append(document_key)
+        initial_document_keys = publish_documents_for_forms(
+            initial_changes_by_form,
+            publisher,
+            llm,
+        )
         print("Initial documents:", initial_document_keys)
         tracker.commit(
             message="initial source baseline",
@@ -90,28 +74,13 @@ def main() -> None:
         )
         change_set = tracker.scan()
 
-        changes_by_form = {}
-        form_source_ids = form_source_ids_to_analyze(source_root, change_set)
-        for form_source_id in form_source_ids:
-            changes = affected_entries_for_form(
-                source_root,
-                change_set,
-                form_source_id,
-            )
-            if changes:
-                changes_by_form[form_source_id] = changes
+        changes_by_form = affected_entries_by_form(source_root, change_set)
         print("Affected forms:", list(changes_by_form))
-        updated_document_keys = []
-        for form_source_id, changes in changes_by_form.items():
-            document_key = document_key_for_form(form_source_id)
-            results = document_results_for_entries(
-                changes,
-                document_key,
-                publisher,
-                llm,
-            )
-            if publisher.publish(document_key, results):
-                updated_document_keys.append(document_key)
+        updated_document_keys = publish_documents_for_forms(
+            changes_by_form,
+            publisher,
+            llm,
+        )
         print("Updated documents:", updated_document_keys)
         tracker.commit(
             message="documentation updated",
