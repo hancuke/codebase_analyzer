@@ -165,6 +165,48 @@ def test_deleted_dependency_still_impacts_entry_from_old_graph(
     }
 
 
+def test_deleted_txt_dependency_uses_explicit_language_hint(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "Form_1.txt",
+        "Private Sub Save_Click()\n"
+        "    Call SharedWork\n"
+        "End Sub\n",
+    )
+    _write(
+        tmp_path,
+        "Module_1.txt",
+        "Public Sub SharedWork()\n"
+        "End Sub\n",
+    )
+    tracker = FileTracker(str(tmp_path))
+    tracker.commit(message="baseline")
+    (tmp_path / "Module_1.txt").unlink()
+
+    change_set = tracker.scan()
+    report = analyze_changes(
+        change_set,
+        (
+            SourceFile(
+                "Form_1.txt",
+                (tmp_path / "Form_1.txt").read_text(encoding="utf-8"),
+                language="vba",
+            ),
+        ),
+        [VbaAnalyzer()],
+        source_languages={"Module_1.txt": "vba"},
+    )
+
+    assert [change.function_id for change in report.function_changes] == [
+        "vba:Module_1:SharedWork"
+    ]
+    assert [impact.entry_id for impact in report.entry_impacts] == [
+        "vba:Form_1:Save_Click"
+    ]
+
+
 def test_entry_changes_expose_entry_scoped_context_and_evidence(
     tmp_path: Path,
 ) -> None:

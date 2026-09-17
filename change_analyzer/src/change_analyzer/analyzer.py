@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import difflib
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 from codegraph import AnalysisContext, Codebase, Diagnostic, LanguageAnalyzer, SourceFile
 from filetracker import ChangeSet
@@ -24,8 +24,14 @@ def analyze_changes(
     change_set: ChangeSet,
     working_sources: Sequence[SourceFile],
     analyzers: Sequence[LanguageAnalyzer],
+    *,
+    source_languages: Mapping[str, str] | None = None,
 ) -> ImpactReport:
-    snapshots = build_source_snapshots(change_set, tuple(working_sources))
+    snapshots = build_source_snapshots(
+        change_set,
+        tuple(working_sources),
+        source_languages=source_languages,
+    )
     old_codebase = Codebase.analyze(snapshots.baseline, analyzers)
     new_codebase = Codebase.analyze(snapshots.working, analyzers)
     function_changes = _compare_functions(old_codebase, new_codebase)

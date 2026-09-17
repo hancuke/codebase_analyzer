@@ -88,20 +88,29 @@ fragment 合并到一个文档。
 `DocumentResult`，不会产生多份互相覆盖的 Entry fragment。UI 控件表格等确定性内容由独立
 producer 生成自己的 `DocumentResult`，可与 Entry fragment 共享同一 caller-owned document key。
 
-## Runnable lifecycle example
+## Runnable examples
 
 ```bash
-uv run python examples/documentation_lifecycle.py
+uv run python examples/initial_documentation.py
+uv run python examples/changed_module_documentation.py
 ```
 
-该示例在临时目录中依次演示：
+两个独立脚本各自在临时目录中演示一个调用方场景：
 
-1. 建立 VBA 源码 baseline；
-2. 修改一个被 Entry 调用的依赖，使用 `entry_changes()` 找到受影响 Entry；
-3. 由调用方将 Entry facts 转换为 prompt，使用 deterministic mock LLM 生成一个 UPSERT result；
-4. 由调用方将 fragment 映射到 `docs/frmOrder.md`、调用 `apply_result()` 并写入文件；
-5. 删除 Entry，依据 old context 生成 DELETE result，并由调用方在文档为空时删除物理文件；
-6. 每次所有文档成功发布后才推进 FileTracker baseline。
+1. [`initial_documentation.py`](examples/initial_documentation.py)：创建 VBA 源码后调用 `tracker.scan()`，从全部 Entry 生成文档；所有文档发布成功后，由调用方创建 baseline。
+2. [`changed_module_documentation.py`](examples/changed_module_documentation.py)：先生成初始文档并建立 source baseline，再修改一个被 Entry 调用的 module；再次调用 `tracker.scan()` 后，`entry_changes()` 只返回受影响 Entry，发布更新后由调用方推进 baseline。
+
+示例约定 VBA 导出文件同级存放，并使用 `Form_*.txt` 和 `Module_*.txt` 命名。每个 Form 的完整
+分析上下文是该 Form 加上全部 Module；`.txt` 文件由示例适配器显式标记为 VBA。Form 按
+UTF-16 读取，并只将 `CodeBehindForm` 行之后的 VBA 代码交给 CodeGraph；Module 支持 UTF-8
+或带 BOM 的 UTF-16。
+
+公共的加载、form 范围分析、文档生成与发布对象位于
+[`documentation_example_support.py`](examples/documentation_example_support.py)。
+两个脚本都明确展示 `scan() -> form_source_ids_to_analyze()
+-> affected_entries_for_form()
+-> document_results_for_entries() -> publish() -> commit()`：每个 form 是一个文档的所有者，
+其受影响 Entry 只更新该 form 的文档；baseline 只在所有文档成功发布后由调用方推进。
 
 ## Setup and validation
 

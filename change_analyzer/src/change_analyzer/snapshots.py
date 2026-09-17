@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from codegraph import SourceFile
 from filetracker import ChangeSet, ChangeStatus
 
@@ -9,21 +11,30 @@ from .models import SnapshotIssue, SourceSnapshots
 def build_source_snapshots(
     change_set: ChangeSet,
     working_sources: tuple[SourceFile, ...] | list[SourceFile],
+    *,
+    source_languages: Mapping[str, str] | None = None,
 ) -> SourceSnapshots:
     """Reconstruct baseline and working source snapshots from one scan.
 
     ``working_sources`` supplies the complete current project. Changed files are
     replaced with the immutable content captured by ``FileTracker.scan()`` so
-    both snapshots remain tied to the scan revisions.
+    both snapshots remain tied to the scan revisions. ``source_languages``
+    supplies analyzer hints for deleted sources that are absent from the current
+    project and cannot be classified by file extension.
     """
 
+    language_hints = source_languages or {}
     baseline = {source.source_id: source for source in working_sources}
     working = dict(baseline)
     issues: list[SnapshotIssue] = []
 
     for file_change in change_set.files:
         source_id = file_change.path.as_posix()
-        language = working.get(source_id).language if source_id in working else None
+        language = (
+            working[source_id].language
+            if source_id in working
+            else language_hints.get(source_id)
+        )
 
         if file_change.status is ChangeStatus.ADDED:
             baseline.pop(source_id, None)
