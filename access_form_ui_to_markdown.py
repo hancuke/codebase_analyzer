@@ -71,6 +71,7 @@ def extract_ui_elements(text: str) -> list[UiElement]:
     """Extract typed UI blocks before the optional CodeBehindForm VBA section."""
     elements: list[UiElement] = []
     stack: list[UiElement | None] = []
+    continued_property: tuple[UiElement, str] | None = None
 
     for line_number, raw_line in enumerate(text.splitlines(), start=1):
         line = raw_line.strip()
@@ -79,6 +80,7 @@ def extract_ui_elements(text: str) -> list[UiElement]:
 
         typed_begin = _TYPED_BEGIN.match(raw_line)
         if typed_begin:
+            continued_property = None
             element = UiElement(typed_begin.group(1))
             elements.append(element)
             if parent := _current_element(stack):
@@ -86,9 +88,11 @@ def extract_ui_elements(text: str) -> list[UiElement]:
             stack.append(element)
             continue
         if _BARE_BEGIN.match(raw_line):
+            continued_property = None
             stack.append(None)
             continue
         if line == "End":
+            continued_property = None
             if not stack:
                 raise ValueError(f"line {line_number}: unmatched End")
             stack.pop()
@@ -99,8 +103,21 @@ def extract_ui_elements(text: str) -> list[UiElement]:
             key, value = property_match.groups()
             if current := _current_element(stack):
                 current.properties[key] = _unquote_access_value(value)
+                continued_property = (
+                    (current, key) if _access_string_fragment(value) is not None else None
+                )
+            else:
+                continued_property = None
             if value == "Begin":
                 stack.append(None)
+            continue
+
+        fragment = _access_string_fragment(raw_line)
+        if continued_property is not None and fragment is not None:
+            element, key = continued_property
+            element.properties[key] += fragment
+            continue
+        continued_property = None
 
     if stack:
         raise ValueError("unterminated Begin block in UI definition")
@@ -189,9 +206,16 @@ def main() -> None:
 
 def _unquote_access_value(value: str) -> str:
     value = value.strip()
+    if (fragment := _access_string_fragment(value)) is not None:
+        return fragment
+    return value
+
+
+def _access_string_fragment(value: str) -> str | None:
+    value = value.strip()
     if len(value) >= 2 and value.startswith('"') and value.endswith('"'):
         return value[1:-1].replace('""', '"')
-    return value
+    return None
 
 
 def _current_element(stack: list[UiElement | None]) -> UiElement | None:
