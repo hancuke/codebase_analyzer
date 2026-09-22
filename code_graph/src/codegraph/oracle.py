@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from pathlib import PurePath
 from typing import Sequence
 
@@ -8,12 +9,28 @@ from pygments.lexers import get_lexer_by_name
 from pygments.token import Comment, Name, String, Text
 
 from .analyzer import BaseAnalyzer, RawCall
-from .model import AnalysisResult, Diagnostic, Function, SourceFile, SourceRange
+from .model import (
+    AnalysisResult,
+    Diagnostic,
+    EntryPoint,
+    Function,
+    SourceFile,
+    SourceRange,
+)
 
 
 _PACKAGE = re.compile(
     r"\bcreate\s+(?:or\s+replace\s+)?package\s+(body\s+)?"
     r"(?:(?:[A-Za-z_]\w*)\.)?([A-Za-z_]\w*)",
+    re.IGNORECASE,
+)
+_STANDALONE_MEMBER = re.compile(
+    r"^\s*create\s+(?:or\s+replace\s+)?"
+    r"(?:procedure\s+(?:(?P<procedure_schema>[A-Za-z_]\w*)\.)?"
+    r"(?P<procedure>[A-Za-z_]\w*)|"
+    r"function\s+(?:(?P<function_schema>[A-Za-z_]\w*)\.)?"
+    r"(?P<function>[A-Za-z_]\w*))"
+    r"(?P<tail>.*)$",
     re.IGNORECASE,
 )
 _MEMBER = re.compile(
@@ -33,6 +50,14 @@ _CONTROL_WORDS = {
 }
 
 
+@dataclass(frozen=True)
+class _PackageMemberDeclaration:
+    package: str
+    name: str
+    source_id: str
+    line: int
+
+
 class OraclePlsqlAnalyzer(BaseAnalyzer):
     """Parser for Oracle PL/SQL package members and their direct calls."""
 
@@ -42,21 +67,16 @@ class OraclePlsqlAnalyzer(BaseAnalyzer):
 
     def __init__(self) -> None:
         self._functions: tuple[Function, ...] = ()
+        self._declared_members: dict[tuple[str, str], _PackageMemberDeclaration] = {}
 
     def analyze(self, files: Sequence[SourceFile]) -> AnalysisResult:
-        body_packages = {
-            match.group(2).casefold()
-            for source_file in files
-            for match in [_PACKAGE.search(source_file.content)]
-            if match is not None and match.group(1) is not None
-        }
+        self._declared_members = self._package_declarations(files)
         analysis_files = tuple(
             source_file
             for source_file in files
             if not (
                 (package_match := _PACKAGE.search(source_file.content)) is not None
                 and package_match.group(1) is None
-                and package_match.group(2).casefold() in body_packages
             )
         )
         # Resolve qualified package calls against the complete batch symbol set.
@@ -67,7 +87,48 @@ class OraclePlsqlAnalyzer(BaseAnalyzer):
         )
         analysis = super().analyze(analysis_files)
         self._functions = analysis.functions
-        return analysis
+        implemented_members = {
+            (function.module.casefold(), function.name.casefold())
+            for function in analysis.functions
+            if function.attributes.get("body") is True
+        }
+        missing_implementations = tuple(
+            Diagnostic(
+                code="missing_package_member_implementation",
+                severity="warning",
+                message=(
+                    f"Public PL/SQL package member {package}.{name} has no "
+                    "implementation in the analyzed package bodies."
+                ),
+                source_id=declaration.source_id,
+                line=declaration.line,
+            )
+            for (package, name), declaration in sorted(self._declared_members.items())
+            if (package, name) not in implemented_members
+        )
+        return AnalysisResult(
+            functions=analysis.functions,
+            calls=analysis.calls,
+            entry_points=analysis.entry_points,
+            diagnostics=(*analysis.diagnostics, *missing_implementations),
+        )
+
+    def detect_entry_point(self, function: Function) -> EntryPoint | None:
+        if function.attributes.get("body") is True:
+            if function.attributes.get("visibility") != "public":
+                return None
+            return EntryPoint(
+                function_id=function.id,
+                kind="package_public_member",
+                source="package_spec",
+            )
+        if function.attributes.get("standalone") is True:
+            return EntryPoint(
+                function_id=function.id,
+                kind=f"standalone_{function.attributes['member_kind']}",
+                source="declaration",
+            )
+        return None
 
     def extract_functions(
         self, source_file: SourceFile
@@ -75,14 +136,7 @@ class OraclePlsqlAnalyzer(BaseAnalyzer):
         lines = source_file.content.splitlines(keepends=True)
         package_match = _PACKAGE.search(source_file.content)
         if package_match is None:
-            return [], [
-                Diagnostic(
-                    code="parse_error",
-                    severity="error",
-                    message="PL/SQL package declaration was not found.",
-                    source_id=source_file.source_id,
-                )
-            ]
+            return self._extract_standalone_member(source_file, lines)
 
         package = package_match.group(2)
         is_body = package_match.group(1) is not None
@@ -260,8 +314,8 @@ class OraclePlsqlAnalyzer(BaseAnalyzer):
                 return False
         return False
 
-    @staticmethod
     def _make_function(
+        self,
         source_file: SourceFile,
         package: str,
         name: str,
@@ -279,10 +333,103 @@ class OraclePlsqlAnalyzer(BaseAnalyzer):
             source=source,
             source_range=SourceRange(start_line=start + 1, end_line=end + 1),
             attributes={
-                "visibility": "public",
+                "visibility": (
+                    "public"
+                    if (package.casefold(), name.casefold()) in self._declared_members
+                    else "private"
+                ),
                 "package": package,
                 "body": is_body,
                 "declaration_only": not is_body,
                 "path": PurePath(source_file.source_id).suffix.casefold(),
             },
         )
+
+    def _extract_standalone_member(
+        self, source_file: SourceFile, lines: list[str]
+    ) -> tuple[list[Function], list[Diagnostic]]:
+        functions: list[Function] = []
+        diagnostics: list[Diagnostic] = []
+        index = 0
+        while index < len(lines):
+            match = _STANDALONE_MEMBER.match(lines[index])
+            if match is None:
+                index += 1
+                continue
+
+            start = index
+            name = match.group("procedure") or match.group("function")
+            end = self._find_member_end(lines, start, name)
+            if end is None:
+                diagnostics.append(
+                    Diagnostic(
+                        code="unterminated_procedure",
+                        severity="error",
+                        message=f"PL/SQL standalone member {name!r} has no matching END.",
+                        source_id=source_file.source_id,
+                        line=start + 1,
+                    )
+                )
+                index += 1
+                continue
+
+            kind = "procedure" if match.group("procedure") else "function"
+            schema = (
+                match.group("procedure_schema")
+                or match.group("function_schema")
+                or PurePath(source_file.source_id).stem
+            )
+            functions.append(
+                Function(
+                    id=f"plsql:standalone:{schema}:{name}",
+                    name=name,
+                    language="plsql",
+                    module=schema,
+                    source_id=source_file.source_id,
+                    source="".join(lines[start : end + 1]),
+                    source_range=SourceRange(
+                        start_line=start + 1,
+                        end_line=end + 1,
+                    ),
+                    attributes={
+                        "visibility": "public",
+                        "standalone": True,
+                        "member_kind": kind,
+                        "path": PurePath(source_file.source_id).suffix.casefold(),
+                    },
+                )
+            )
+            index = end + 1
+
+        if not functions and not diagnostics:
+            return [], [
+                Diagnostic(
+                    code="parse_error",
+                    severity="error",
+                    message="PL/SQL package or standalone procedure/function declaration was not found.",
+                    source_id=source_file.source_id,
+                )
+            ]
+        return functions, diagnostics
+
+    @staticmethod
+    def _package_declarations(
+        files: Sequence[SourceFile],
+    ) -> dict[tuple[str, str], _PackageMemberDeclaration]:
+        declarations: dict[tuple[str, str], _PackageMemberDeclaration] = {}
+        for source_file in files:
+            package_match = _PACKAGE.search(source_file.content)
+            if package_match is None or package_match.group(1) is not None:
+                continue
+            package = package_match.group(2).casefold()
+            for line_number, line in enumerate(source_file.content.splitlines(), start=1):
+                member_match = _MEMBER.match(line)
+                if member_match is not None:
+                    name = member_match.group(2) or member_match.group(3)
+                    declarations[(package, name.casefold())] = _PackageMemberDeclaration(
+                        package=package,
+                        name=name.casefold(),
+                        source_id=source_file.source_id,
+                        line=line_number,
+                    )
+        return declarations

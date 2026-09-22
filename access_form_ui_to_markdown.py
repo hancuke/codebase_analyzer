@@ -317,7 +317,7 @@ def _joined_properties(
     properties: dict[str, str], *keys: str, separator: str = ", "
 ) -> str:
     values = [
-        f"{key}={_display_property_value(properties[key])}"
+        f"{key}={_display_property_value(key, properties[key])}"
         for key in keys
         if key in properties
     ]
@@ -372,7 +372,9 @@ def _event_description(
     return f"{event}: {procedure}"
 
 
-def _display_property_value(value: str) -> str:
+def _display_property_value(key: str, value: str) -> str:
+    if key == "RowSource":
+        value = value.replace(r"\015\012", " ")
     return "non-default" if value == "NotDefault" else value
 
 
