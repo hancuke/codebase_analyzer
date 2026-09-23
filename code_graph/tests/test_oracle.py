@@ -258,3 +258,78 @@ END refresh_batch;
             "standalone_procedure",
         ),
     ]
+
+
+def test_oracle_package_member_ends_after_nested_blocks() -> None:
+    source = """
+CREATE OR REPLACE PACKAGE BODY pkg_vald AS
+  PROCEDURE ins_vald_log IS
+  BEGIN
+    BEGIN
+      NULL;
+    EXCEPTION
+      WHEN NO_DATA_FOUND THEN
+        NULL;
+    END;
+    IF 1 = 1 THEN
+      NULL;
+    END IF;
+  END;
+
+  PROCEDURE validate_rule IS
+    FUNCTION local_count RETURN NUMBER IS
+    BEGIN
+      RETURN 1;
+    END;
+  BEGIN
+    FOR item IN 1..local_count LOOP
+      CASE item
+        WHEN 1 THEN NULL;
+        ELSE NULL;
+      END CASE;
+    END LOOP;
+  END;
+END;
+""".lstrip()
+
+    functions, diagnostics = OraclePlsqlAnalyzer().extract_functions(
+        SourceFile("pkg_vald.pkb", source)
+    )
+
+    assert [
+        (function.name, function.source_range.start_line, function.source_range.end_line)
+        for function in functions
+    ] == [
+        ("ins_vald_log", 2, 13),
+        ("validate_rule", 15, 27),
+    ]
+    assert "PROCEDURE validate_rule" not in functions[0].source
+    assert "FUNCTION local_count" in functions[1].source
+    assert not diagnostics
+
+
+def test_oracle_ignores_declarations_in_comments_and_strings() -> None:
+    source = """
+-- CREATE PACKAGE BODY fake AS
+CREATE PACKAGE BODY "Real$Package" AS
+  text_value VARCHAR2(100) := 'PROCEDURE fake IS BEGIN NULL; END;';
+
+  PROCEDURE "do$work" IS
+  BEGIN
+    NULL;
+  END;
+END;
+""".lstrip()
+
+    functions, diagnostics = OraclePlsqlAnalyzer().extract_functions(
+        SourceFile("real.pkb", source)
+    )
+
+    assert [(function.module, function.name) for function in functions] == [
+        ("Real$Package", "do$work")
+    ]
+    assert (
+        functions[0].source_range.start_line,
+        functions[0].source_range.end_line,
+    ) == (5, 8)
+    assert not diagnostics

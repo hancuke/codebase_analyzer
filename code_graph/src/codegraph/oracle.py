@@ -19,28 +19,6 @@ from .model import (
 )
 
 
-_PACKAGE = re.compile(
-    r"\bcreate\s+(?:or\s+replace\s+)?package\s+(body\s+)?"
-    r"(?:(?:[A-Za-z_]\w*)\.)?([A-Za-z_]\w*)",
-    re.IGNORECASE,
-)
-_STANDALONE_MEMBER = re.compile(
-    r"^\s*create\s+(?:or\s+replace\s+)?"
-    r"(?:procedure\s+(?:(?P<procedure_schema>[A-Za-z_]\w*)\.)?"
-    r"(?P<procedure>[A-Za-z_]\w*)|"
-    r"function\s+(?:(?P<function_schema>[A-Za-z_]\w*)\.)?"
-    r"(?P<function>[A-Za-z_]\w*))"
-    r"(?P<tail>.*)$",
-    re.IGNORECASE,
-)
-_MEMBER = re.compile(
-    r"^\s*(?:(?:public|private|protected)\s+)?"
-    r"(procedure\s+([A-Za-z_]\w*)|function\s+([A-Za-z_]\w*))"
-    r"(?P<tail>.*)$",
-    re.IGNORECASE,
-)
-_IMPLEMENTATION = re.compile(r"\b(?:is|as)\b", re.IGNORECASE)
-_BARE_END = re.compile(r"^\s*end\s*;", re.IGNORECASE)
 _CONTROL_WORDS = {
     "and", "as", "begin", "case", "close", "commit", "constant", "cursor",
     "declare", "delete", "else", "elsif", "end", "exception", "exit", "for",
@@ -56,6 +34,29 @@ class _PackageMemberDeclaration:
     name: str
     source_id: str
     line: int
+
+
+@dataclass(frozen=True)
+class _PlsqlToken:
+    value: str
+    normalized: str
+    line: int
+    identifier: str | None = None
+
+
+@dataclass(frozen=True)
+class _Package:
+    name: str
+    is_body: bool
+    declaration_end: int
+
+
+@dataclass(frozen=True)
+class _MemberHeader:
+    kind: str
+    name: str
+    marker: str
+    marker_index: int
 
 
 class OraclePlsqlAnalyzer(BaseAnalyzer):
@@ -75,8 +76,9 @@ class OraclePlsqlAnalyzer(BaseAnalyzer):
             source_file
             for source_file in files
             if not (
-                (package_match := _PACKAGE.search(source_file.content)) is not None
-                and package_match.group(1) is None
+                (package := self._find_package(self._tokens(source_file.content)))
+                is not None
+                and not package.is_body
             )
         )
         # Resolve qualified package calls against the complete batch symbol set.
@@ -134,65 +136,64 @@ class OraclePlsqlAnalyzer(BaseAnalyzer):
         self, source_file: SourceFile
     ) -> tuple[list[Function], list[Diagnostic]]:
         lines = source_file.content.splitlines(keepends=True)
-        package_match = _PACKAGE.search(source_file.content)
-        if package_match is None:
-            return self._extract_standalone_member(source_file, lines)
+        tokens = self._tokens(source_file.content)
+        package = self._find_package(tokens)
+        if package is None:
+            return self._extract_standalone_members(source_file, lines, tokens)
 
-        package = package_match.group(2)
-        is_body = package_match.group(1) is not None
         functions: list[Function] = []
         diagnostics: list[Diagnostic] = []
-        index = 0
-        while index < len(lines):
-            match = _MEMBER.match(lines[index])
-            if match is None:
+        index = package.declaration_end + 1
+        while index < len(tokens):
+            token = tokens[index]
+            if token.normalized == "begin":
+                break
+            if token.normalized not in {"procedure", "function"}:
                 index += 1
                 continue
 
-            name = match.group(2) or match.group(3)
-            implemented = self._has_implementation(lines, index, match.group("tail"))
-            if is_body and not implemented:
+            header = self._member_header(tokens, index)
+            if header is None:
                 index += 1
                 continue
-            if not is_body and implemented:
+            implemented = header.marker != ";"
+            if package.is_body and not implemented:
+                index = header.marker_index + 1
+                continue
+            if not package.is_body and implemented:
                 index += 1
                 continue
 
-            if not is_body:
-                end = index
-                while ";" not in lines[end] and end + 1 < len(lines):
-                    end += 1
-                source = "".join(lines[index : end + 1])
-                functions.append(
-                    self._make_function(
-                        source_file, package, name, index, end, source, is_body
-                    )
-                )
-                index = end + 1
-                continue
-
-            end = self._find_member_end(lines, index, name)
+            end = (
+                header.marker_index
+                if not implemented
+                else self._find_subprogram_end(tokens, header.marker_index)
+            )
             if end is None:
                 diagnostics.append(
                     Diagnostic(
                         code="unterminated_procedure",
                         severity="error",
-                        message=f"PL/SQL package member {name!r} has no matching END.",
+                        message=(
+                            f"PL/SQL package member {header.name!r} has no matching END."
+                        ),
                         source_id=source_file.source_id,
-                        line=index + 1,
+                        line=token.line,
                     )
                 )
                 index += 1
                 continue
+            start_line = token.line
+            end_line = tokens[end].line
             functions.append(
                 self._make_function(
                     source_file,
-                    package,
-                    name,
-                    index,
-                    end,
-                    "".join(lines[index : end + 1]),
-                    is_body,
+                    package.name,
+                    header.name,
+                    start_line,
+                    end_line,
+                    "".join(lines[start_line - 1 : end_line]),
+                    package.is_body,
                 )
             )
             index = end + 1
@@ -288,32 +289,6 @@ class OraclePlsqlAnalyzer(BaseAnalyzer):
             return candidates[0].id
         return None
 
-    @staticmethod
-    def _find_member_end(
-        lines: list[str], start: int, name: str
-    ) -> int | None:
-        named_end = re.compile(
-            rf"^\s*end\s+{re.escape(name)}\s*;", re.IGNORECASE
-        )
-        for index in range(start + 1, len(lines)):
-            if named_end.match(lines[index]):
-                return index
-            if _BARE_END.match(lines[index]):
-                return index
-        return None
-
-    @staticmethod
-    def _has_implementation(
-        lines: list[str], start: int, first_tail: str
-    ) -> bool:
-        for index in range(start, len(lines)):
-            text = first_tail if index == start else lines[index]
-            if _IMPLEMENTATION.search(text):
-                return True
-            if ";" in text:
-                return False
-        return False
-
     def _make_function(
         self,
         source_file: SourceFile,
@@ -331,7 +306,7 @@ class OraclePlsqlAnalyzer(BaseAnalyzer):
             module=package,
             source_id=source_file.source_id,
             source=source,
-            source_range=SourceRange(start_line=start + 1, end_line=end + 1),
+            source_range=SourceRange(start_line=start, end_line=end),
             attributes={
                 "visibility": (
                     "public"
@@ -345,56 +320,73 @@ class OraclePlsqlAnalyzer(BaseAnalyzer):
             },
         )
 
-    def _extract_standalone_member(
-        self, source_file: SourceFile, lines: list[str]
+    def _extract_standalone_members(
+        self,
+        source_file: SourceFile,
+        lines: list[str],
+        tokens: list[_PlsqlToken],
     ) -> tuple[list[Function], list[Diagnostic]]:
         functions: list[Function] = []
         diagnostics: list[Diagnostic] = []
         index = 0
-        while index < len(lines):
-            match = _STANDALONE_MEMBER.match(lines[index])
-            if match is None:
+        while index < len(tokens):
+            create_index = self._standalone_member_start(tokens, index)
+            if create_index is None:
                 index += 1
                 continue
 
-            start = index
-            name = match.group("procedure") or match.group("function")
-            end = self._find_member_end(lines, start, name)
+            member_index = create_index
+            while tokens[member_index].normalized not in {"procedure", "function"}:
+                member_index += 1
+            header = self._member_header(tokens, member_index, qualified=True)
+            if header is None or header.marker == ";":
+                index = member_index + 1
+                continue
+            end = self._find_subprogram_end(tokens, header.marker_index)
             if end is None:
                 diagnostics.append(
                     Diagnostic(
                         code="unterminated_procedure",
                         severity="error",
-                        message=f"PL/SQL standalone member {name!r} has no matching END.",
+                        message=(
+                            f"PL/SQL standalone member {header.name!r} "
+                            "has no matching END."
+                        ),
                         source_id=source_file.source_id,
-                        line=start + 1,
+                        line=tokens[create_index].line,
                     )
                 )
-                index += 1
+                index = member_index + 1
                 continue
 
-            kind = "procedure" if match.group("procedure") else "function"
-            schema = (
-                match.group("procedure_schema")
-                or match.group("function_schema")
-                or PurePath(source_file.source_id).stem
-            )
+            name_index = member_index + 1
+            first_name = tokens[name_index].identifier
+            schema = PurePath(source_file.source_id).stem
+            if (
+                first_name is not None
+                and name_index + 2 < len(tokens)
+                and tokens[name_index + 1].value == "."
+                and tokens[name_index + 2].identifier is not None
+            ):
+                schema = first_name
+            start_line = tokens[create_index].line
+            end_line = tokens[end].line
             functions.append(
                 Function(
-                    id=f"plsql:standalone:{schema}:{name}",
-                    name=name,
+                    id=f"plsql:standalone:{schema}:{header.name}",
+                    name=header.name,
                     language="plsql",
                     module=schema,
                     source_id=source_file.source_id,
-                    source="".join(lines[start : end + 1]),
+                    source="".join(lines[start_line - 1 : end_line]),
                     source_range=SourceRange(
-                        start_line=start + 1,
-                        end_line=end + 1,
+                        start_line=start_line,
+                        end_line=end_line,
                     ),
                     attributes={
                         "visibility": "public",
                         "standalone": True,
-                        "member_kind": kind,
+                        "member_kind": header.kind,
                         "path": PurePath(source_file.source_id).suffix.casefold(),
                     },
                 )
@@ -412,24 +404,235 @@ class OraclePlsqlAnalyzer(BaseAnalyzer):
             ]
         return functions, diagnostics
 
-    @staticmethod
     def _package_declarations(
-        files: Sequence[SourceFile],
+        self, files: Sequence[SourceFile]
     ) -> dict[tuple[str, str], _PackageMemberDeclaration]:
         declarations: dict[tuple[str, str], _PackageMemberDeclaration] = {}
         for source_file in files:
-            package_match = _PACKAGE.search(source_file.content)
-            if package_match is None or package_match.group(1) is not None:
+            tokens = self._tokens(source_file.content)
+            package = self._find_package(tokens)
+            if package is None or package.is_body:
                 continue
-            package = package_match.group(2).casefold()
-            for line_number, line in enumerate(source_file.content.splitlines(), start=1):
-                member_match = _MEMBER.match(line)
-                if member_match is not None:
-                    name = member_match.group(2) or member_match.group(3)
-                    declarations[(package, name.casefold())] = _PackageMemberDeclaration(
-                        package=package,
-                        name=name.casefold(),
-                        source_id=source_file.source_id,
-                        line=line_number,
-                    )
+            index = package.declaration_end + 1
+            while index < len(tokens):
+                token = tokens[index]
+                if token.normalized in {"begin", "end"}:
+                    break
+                if token.normalized not in {"procedure", "function"}:
+                    index += 1
+                    continue
+                header = self._member_header(tokens, index)
+                if header is None:
+                    index += 1
+                    continue
+                key = (package.name.casefold(), header.name.casefold())
+                declarations[key] = _PackageMemberDeclaration(
+                    package=package.name.casefold(),
+                    name=header.name.casefold(),
+                    source_id=source_file.source_id,
+                    line=token.line,
+                )
+                index = header.marker_index + 1
         return declarations
+
+    @staticmethod
+    def _tokens(content: str) -> list[_PlsqlToken]:
+        lexer = get_lexer_by_name("sql")
+        tokens: list[_PlsqlToken] = []
+        line = 1
+        for _, token_type, value in lexer.get_tokens_unprocessed(content):
+            token_line = line
+            line += value.count("\n")
+            if (
+                token_type in Text.Whitespace
+                or token_type in Comment
+                or (token_type in String and token_type not in String.Symbol)
+            ):
+                continue
+            identifier = None
+            if token_type in Name or token_type in String.Symbol:
+                identifier = value
+                if value.startswith('"') and value.endswith('"'):
+                    identifier = value[1:-1].replace('""', '"')
+            tokens.append(
+                _PlsqlToken(
+                    value=value,
+                    normalized=value.casefold(),
+                    line=token_line,
+                    identifier=identifier,
+                )
+            )
+        return tokens
+
+    @classmethod
+    def _find_package(cls, tokens: list[_PlsqlToken]) -> _Package | None:
+        for index, token in enumerate(tokens):
+            if token.normalized != "create":
+                continue
+            cursor = index + 1
+            if cls._matches(tokens, cursor, "or", "replace"):
+                cursor += 2
+            if not cls._matches(tokens, cursor, "package"):
+                continue
+            cursor += 1
+            is_body = cls._matches(tokens, cursor, "body")
+            if is_body:
+                cursor += 1
+            name, cursor = cls._qualified_name(tokens, cursor)
+            if name is None:
+                continue
+            while cursor < len(tokens):
+                if tokens[cursor].normalized in {"as", "is"}:
+                    return _Package(
+                        name=name,
+                        is_body=is_body,
+                        declaration_end=cursor,
+                    )
+                if tokens[cursor].value == ";":
+                    break
+                cursor += 1
+        return None
+
+    @classmethod
+    def _member_header(
+        cls,
+        tokens: list[_PlsqlToken],
+        index: int,
+        *,
+        qualified: bool = False,
+    ) -> _MemberHeader | None:
+        kind = tokens[index].normalized
+        if kind not in {"procedure", "function"}:
+            return None
+        cursor = index + 1
+        if qualified:
+            name, cursor = cls._qualified_name(tokens, cursor)
+        else:
+            name = tokens[cursor].identifier if cursor < len(tokens) else None
+            cursor += 1
+        if name is None:
+            return None
+
+        parentheses = 0
+        while cursor < len(tokens):
+            token = tokens[cursor]
+            if token.value == "(":
+                parentheses += 1
+            elif token.value == ")":
+                parentheses = max(0, parentheses - 1)
+            elif parentheses == 0 and (
+                token.value == ";"
+                or token.normalized in {"as", "is", "begin"}
+            ):
+                return _MemberHeader(
+                    kind=kind,
+                    name=name,
+                    marker=token.normalized if token.value != ";" else ";",
+                    marker_index=cursor,
+                )
+            cursor += 1
+        return None
+
+    @classmethod
+    def _find_subprogram_end(
+        cls, tokens: list[_PlsqlToken], marker_index: int
+    ) -> int | None:
+        if tokens[marker_index].normalized == "begin":
+            return cls._find_block_end(tokens, marker_index)
+
+        index = marker_index + 1
+        while index < len(tokens):
+            token = tokens[index]
+            if token.normalized == "language":
+                return cls._next_semicolon(tokens, index)
+            if token.normalized in {"procedure", "function"}:
+                nested = cls._member_header(tokens, index)
+                if nested is not None:
+                    if nested.marker == ";":
+                        index = nested.marker_index + 1
+                        continue
+                    nested_end = cls._find_subprogram_end(tokens, nested.marker_index)
+                    if nested_end is None:
+                        return None
+                    index = nested_end + 1
+                    continue
+            if token.normalized == "begin":
+                return cls._find_block_end(tokens, index)
+            index += 1
+        return None
+
+    @classmethod
+    def _find_block_end(
+        cls, tokens: list[_PlsqlToken], begin_index: int
+    ) -> int | None:
+        depth = 1
+        index = begin_index + 1
+        while index < len(tokens):
+            token = tokens[index]
+            if token.normalized in {"begin", "case", "if", "loop"}:
+                depth += 1
+            elif token.normalized == "end":
+                depth -= 1
+                semicolon = cls._next_semicolon(tokens, index)
+                if semicolon is None:
+                    return None
+                if depth == 0:
+                    return semicolon
+                index = semicolon
+            index += 1
+        return None
+
+    @staticmethod
+    def _next_semicolon(
+        tokens: list[_PlsqlToken], index: int
+    ) -> int | None:
+        for cursor in range(index + 1, len(tokens)):
+            if tokens[cursor].value == ";":
+                return cursor
+        return None
+
+    @classmethod
+    def _standalone_member_start(
+        cls, tokens: list[_PlsqlToken], index: int
+    ) -> int | None:
+        if tokens[index].normalized != "create":
+            return None
+        cursor = index + 1
+        if cls._matches(tokens, cursor, "or", "replace"):
+            cursor += 2
+        if (
+            cursor < len(tokens)
+            and tokens[cursor].normalized in {"procedure", "function"}
+        ):
+            return index
+        return None
+
+    @staticmethod
+    def _qualified_name(
+        tokens: list[_PlsqlToken], index: int
+    ) -> tuple[str | None, int]:
+        if index >= len(tokens) or tokens[index].identifier is None:
+            return None, index
+        name = tokens[index].identifier
+        index += 1
+        if (
+            index + 1 < len(tokens)
+            and tokens[index].value == "."
+            and tokens[index + 1].identifier is not None
+        ):
+            name = tokens[index + 1].identifier
+            index += 2
+        return name, index
+
+    @staticmethod
+    def _matches(
+        tokens: list[_PlsqlToken], index: int, *values: str
+    ) -> bool:
+        return (
+            index + len(values) <= len(tokens)
+            and tuple(
+                token.normalized
+                for token in tokens[index : index + len(values)]
+            )
+            == values
+        )

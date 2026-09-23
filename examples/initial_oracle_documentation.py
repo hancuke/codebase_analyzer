@@ -1,4 +1,4 @@
-"""Generate documentation from the first scan of an Oracle PL/SQL source tree."""
+"""Generate and incrementally update documentation for Oracle PL/SQL."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import tempfile
 from collections import defaultdict
 from pathlib import Path
 
-from change_analyzer import analyze_changes, entry_changes
+from change_analyzer import EntryChange, analyze_changes, entry_changes
 from codegraph import OraclePlsqlAnalyzer, SourceFile
 from documentation_example_support import (
     DemoLlmClient,
@@ -14,26 +14,22 @@ from documentation_example_support import (
     document_results_for_entries,
     write_source,
 )
-from filetracker import ChangeStatus, FileTracker
+from filetracker import ChangeSet, FileTracker
 
 
 _PLSQL_SUFFIXES = {".pkb", ".pks", ".pls", ".sql"}
 
 
-def _working_sources(change_set) -> tuple[SourceFile, ...]:
-    """Build the complete PL/SQL working snapshot captured by the scan."""
+def _working_sources(source_root: Path) -> tuple[SourceFile, ...]:
+    """Build a complete PL/SQL working snapshot from the current source tree."""
     sources = []
-    for change in change_set.files:
-        if change.status is ChangeStatus.DELETED:
+    for path in sorted(source_root.rglob("*")):
+        if not path.is_file() or path.suffix.casefold() not in _PLSQL_SUFFIXES:
             continue
-        if change.path.suffix.casefold() not in _PLSQL_SUFFIXES:
-            continue
-        if not change.working_content.is_text:
-            raise ValueError(f"PL/SQL source is not readable as text: {change.path}")
         sources.append(
             SourceFile(
-                source_id=change.path.as_posix(),
-                content=change.working_content.text or "",
+                source_id=path.relative_to(source_root).as_posix(),
+                content=path.read_text(encoding="utf-8"),
                 language="plsql",
             )
         )
@@ -42,6 +38,19 @@ def _working_sources(change_set) -> tuple[SourceFile, ...]:
 
 def _document_key(source_id: str) -> str:
     return f"docs/{Path(source_id).with_suffix('.md').as_posix()}"
+
+
+def _entry_changes_for_scan(
+    source_root: Path,
+    change_set: ChangeSet,
+) -> tuple[EntryChange, ...]:
+     
+    report = analyze_changes(
+        change_set,
+        _working_sources(source_root),
+        [OraclePlsqlAnalyzer()] 
+    )
+    return entry_changes(report)
 
 
 def _publish_documents(
@@ -112,28 +121,45 @@ def main() -> None:
         change_set = tracker.scan()
         publisher = DocumentPublisher(document_root)
         llm = DemoLlmClient()
-        sources = _working_sources(change_set)
-        source_languages = {
-            change.path.as_posix(): "plsql" for change in change_set.files
-        }
-        report = analyze_changes(
-            change_set,
-            sources,
-            [OraclePlsqlAnalyzer()],
-            source_languages=source_languages,
-        )
-        changes = entry_changes(report)
+        changes = _entry_changes_for_scan(source_root, change_set)
 
-        print("PL/SQL entries to document:", [change.entry_id for change in changes])
+        print("Initial PL/SQL entries:", [change.entry_id for change in changes])
         updated_document_keys = _publish_documents(changes, publisher, llm)
-        print("Updated documents:", updated_document_keys)
+        print("Initially updated documents:", updated_document_keys)
         tracker.commit(
             message="initial PL/SQL documentation published",
             expected_revision=change_set.working_revision,
             expected_baseline_revision=change_set.baseline_revision,
         )
 
-        for document_key in updated_document_keys:
+        write_source(
+            source_root,
+            "audit.pkb",
+            "CREATE OR REPLACE PACKAGE BODY audit_pkg AS\n"
+            "    PROCEDURE write_log(p_id NUMBER) IS\n"
+            "    BEGIN\n"
+            "        INSERT INTO audit_log(id) VALUES (p_id);\n"
+            "    END write_log;\n"
+            "END audit_pkg;\n",
+        )
+
+        change_set = tracker.scan()
+        changes = _entry_changes_for_scan(source_root, change_set)
+        print(
+            "Entries affected by audit change:",
+            [change.entry_id for change in changes],
+        )
+        incrementally_updated_keys = _publish_documents(changes, publisher, llm)
+        print("Incrementally updated documents:", incrementally_updated_keys)
+        tracker.commit(
+            message="incremental PL/SQL documentation published",
+            expected_revision=change_set.working_revision,
+            expected_baseline_revision=change_set.baseline_revision,
+        )
+
+        for document_key in sorted(
+            {*updated_document_keys, *incrementally_updated_keys}
+        ):
             document = document_root / document_key
             print(document.relative_to(document_root))
             print(document.read_text(encoding="utf-8"))

@@ -41,18 +41,19 @@ class DemoLlmClient:
         entry_id = user_prompt.split("<Entry>\n", 1)[1].split("\n</Entry>", 1)[0]
         if system_prompt == "Extract the business flow.":
             code = user_prompt.split("<Code>\n", 1)[1].split("\n</Code>", 1)[0]
-            result_line = next(
+            implementation_line = next(
                 (
                     line.strip()
                     for line in code.splitlines()
                     if line.strip().startswith("result =")
+                    or line.strip().casefold().startswith("insert into ")
                 ),
                 "No result is assigned.",
             )
             return (
                 f"## {entry_id.rsplit(':', 1)[-1]}\n\n"
                 f"This generated fragment documents `{entry_id}`.\n\n"
-                f"Current implementation: `{result_line}`."
+                f"Current implementation: `{implementation_line}`."
             )
         return "### Boundaries\n\nValidation failures prevent the operation."
 

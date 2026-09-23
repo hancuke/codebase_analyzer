@@ -10,6 +10,8 @@ from documentation_example_support import (
     publish_documents_for_forms,
     write_source,
 )
+from initial_oracle_documentation import _entry_changes_for_scan
+from change_analyzer import ChangeType
 from filetracker import FileTracker
 
 
@@ -156,3 +158,58 @@ def test_publish_documents_for_forms_returns_changed_document_keys(
 
     assert updated_document_keys == ("docs/Form_1.md",)
     assert (tmp_path / "published" / "docs" / "Form_1.md").exists()
+
+
+def test_oracle_second_scan_maps_intermediate_change_to_entry(
+    tmp_path: Path,
+) -> None:
+    write_source(
+        tmp_path,
+        "orders.pks",
+        "CREATE OR REPLACE PACKAGE orders AS\n"
+        "    PROCEDURE save_order(p_id NUMBER);\n"
+        "END orders;\n",
+    )
+    write_source(
+        tmp_path,
+        "orders.pkb",
+        "CREATE OR REPLACE PACKAGE BODY orders AS\n"
+        "    PROCEDURE save_order(p_id NUMBER) IS\n"
+        "    BEGIN\n"
+        "        audit_pkg.write_log(p_id);\n"
+        "    END save_order;\n"
+        "END orders;\n",
+    )
+    write_source(
+        tmp_path,
+        "audit.pkb",
+        "CREATE OR REPLACE PACKAGE BODY audit_pkg AS\n"
+        "    PROCEDURE write_log(p_id NUMBER) IS\n"
+        "    BEGIN\n"
+        "        NULL;\n"
+        "    END write_log;\n"
+        "END audit_pkg;\n",
+    )
+    tracker = FileTracker(str(tmp_path))
+    tracker.commit(message="baseline")
+
+    write_source(
+        tmp_path,
+        "audit.pkb",
+        "CREATE OR REPLACE PACKAGE BODY audit_pkg AS\n"
+        "    PROCEDURE write_log(p_id NUMBER) IS\n"
+        "    BEGIN\n"
+        "        INSERT INTO audit_log(id) VALUES (p_id);\n"
+        "    END write_log;\n"
+        "END audit_pkg;\n",
+    )
+
+    changes = _entry_changes_for_scan(tmp_path, tracker.scan())
+
+    assert [change.entry_id for change in changes] == [
+        "plsql:orders:save_order"
+    ]
+    assert [
+        (item.function_id, item.change_type)
+        for item in changes[0].function_changes
+    ] == [("plsql:audit_pkg:write_log", ChangeType.MODIFIED)]
