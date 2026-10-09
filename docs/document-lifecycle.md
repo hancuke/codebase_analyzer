@@ -41,7 +41,7 @@ producer 的分组、文件读写、审核和 baseline commit 都保留在调用
 | fragment 存在 | 使用当前 fragment、当前代码和受限变更摘要创建 prompt。 |
 | Entry 已删除 | 直接创建相同 `fragment_id` 的 `DocumentResult(..., DELETE)`。 |
 
-小模型多角度分析同一个 Entry 时，调用方选择稳定有序的多个 `(system_prompt, user_prompt)` 对，
+小模型多角度分析同一个 Entry 时，调用方使用一个 system prompt 和稳定有序的多个 user prompt，
 按序调用模型并合并 completion，最后仍创建唯一的 `UPSERT DocumentResult`。每个 prompt 应限制
 输出长度，并负责不重叠的内容；fragment core 不包含模型、prompt 或视角概念。
 
@@ -56,14 +56,16 @@ updated_document_keys = publish_documents_for_forms(
 )
 ```
 
-默认从脚本旁的 `examples/prompts/` 读取文件，不依赖进程工作目录。调用方可以通过
-`prompt_directory` 更换目录，在函数内直接修改有序的 `prompt_files` 选择规则：
+默认从脚本旁的 `examples/prompts/system/` 和 `examples/prompts/user/` 读取文件，
+不依赖进程工作目录。调用方可以通过 `system_directory`、`user_directory` 分别更换目录，
+但两个目录不能相同。system 目录必须恰好有一个文件（默认示例为 `entry.system.txt`，文件名不限）；
+user 目录按文件名排序读取匹配 `NN-*.user.template`（`NN` 是两位数字）的模板：
 
-1. `business_flow.system.txt` + `entry.user.template`：业务流程。
-2. `boundaries.system.txt` + `entry.user.template`：边界与异常。
+1. `01-business_flow.user.template`：业务流程。
+2. `02-boundaries.user.template`：边界与异常。
 
-这是共享 user template 的两次独立调用，按顺序用空行连接输出，不自动把上一步结果传给下一步。
-每个 pair 也可以使用不同的 user template；无需增加 prompt 对象或 pipeline。
+每次调用都使用同一个 system prompt，按顺序用空行连接输出，不自动把上一步结果传给下一步。
+新增步骤只需添加带编号的 user 模板；system 文件不唯一或没有匹配的 user 模板会报错。
 模板支持 `{entry_id}`、`{code}`、`{history}`，模板本身的字面花括号需写成 `{{`、`}}`；
 插入的源码不进行二次格式化。首次生成的 `history` 为空，更新时包含已有片段和函数变更摘要。
 

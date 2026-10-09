@@ -1,0 +1,9 @@
+Extract the business flow.
+
+<Entry>
+{entry_id}
+</Entry>
+
+<Code>
+{code}
+</Code>{history}

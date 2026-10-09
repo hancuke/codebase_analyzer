@@ -20,10 +20,6 @@ _MODULE_FILE_PREFIX = "module_"
 _VBA_EXPORT_SUFFIX = ".txt"
 _CODE_BEHIND_FORM_MARKER = "CodeBehindForm"
 _DOCUMENT_DIRECTORY = "docs"
-_PROMPT_FILE_PAIRS = (
-    ("business_flow.system.txt", "entry.user.template"),
-    ("boundaries.system.txt", "entry.user.template"),
-)
 
 
 class LlmClient(Protocol):
@@ -39,7 +35,7 @@ class DemoLlmClient:
 
     def generate(self, system_prompt: str, user_prompt: str) -> str:
         entry_id = user_prompt.split("<Entry>\n", 1)[1].split("\n</Entry>", 1)[0]
-        if system_prompt == "Extract the business flow.":
+        if user_prompt.startswith("Extract the business flow."):
             code = user_prompt.split("<Code>\n", 1)[1].split("\n</Code>", 1)[0]
             implementation_line = next(
                 (
@@ -58,13 +54,49 @@ class DemoLlmClient:
         return "### Boundaries\n\nValidation failures prevent the operation."
 
 
+@dataclass(frozen=True)
+class EntryPromptTemplates:
+    system_prompt: str
+    user_templates: tuple[str, ...]
+
+
+def _load_entry_prompts(
+    system_directory: Path,
+    user_directory: Path,
+) -> EntryPromptTemplates:
+    if system_directory.resolve() == user_directory.resolve():
+        raise ValueError("system and user prompt directories must differ")
+
+    system_files = sorted(path for path in system_directory.iterdir() if path.is_file())
+    if len(system_files) != 1:
+        raise ValueError(
+            f"expected exactly one system prompt file in {system_directory}, "
+            f"found {len(system_files)}"
+        )
+    user_files = sorted(user_directory.glob("[0-9][0-9]-*.user.template"))
+    if not user_files:
+        raise ValueError(f"no numbered user prompt templates in {user_directory}")
+
+    system_prompt = system_files[0].read_text(encoding="utf-8").strip()
+    if not system_prompt:
+        raise ValueError(f"empty prompt file: {system_files[0]}")
+    templates = []
+    for user_file in user_files:
+        template = user_file.read_text(encoding="utf-8")
+        if not template.strip():
+            raise ValueError(f"empty prompt file: {user_file}")
+        templates.append(template)
+    return EntryPromptTemplates(system_prompt, tuple(templates))
+
+
 def generate_entry_document(
     change: EntryChange,
     *,
     fragment_id: str,
     existing_markdown: str | None,
     llm: LlmClient,
-    prompt_directory: Path = Path(__file__).with_name("prompts"),
+    system_directory: Path = Path(__file__).with_name("prompts") / "system",
+    user_directory: Path = Path(__file__).with_name("prompts") / "user",
 ) -> DocumentResult:
     """Read prompt files, call the LLM in order, and merge one Entry fragment."""
     if change.new_entry is None:
@@ -85,24 +117,17 @@ def generate_entry_document(
             f"\n\n<ChangeSummary>\n{summary}\n</ChangeSummary>"
         )
 
-    prompts: list[tuple[str, str]] = []
-    for system_file, user_file in _PROMPT_FILE_PAIRS:
-        system_prompt = (prompt_directory / system_file).read_text(
-            encoding="utf-8"
-        ).strip()
-        template = (prompt_directory / user_file).read_text(encoding="utf-8")
-        if not system_prompt or not template.strip():
-            raise ValueError(f"empty prompt file in pair {system_file!r}, {user_file!r}")
-        user_prompt = template.format(
-            entry_id=change.entry_id,
-            code=code,
-            history=history,
-        )
-        prompts.append((system_prompt, user_prompt))
+    prompt_templates = _load_entry_prompts(
+        system_directory, user_directory
+    )
+    user_prompts = tuple(
+        template.format(entry_id=change.entry_id, code=code, history=history)
+        for template in prompt_templates.user_templates
+    )
 
     completions: list[str] = []
-    for system_prompt, user_prompt in prompts:
-        completion = llm.generate(system_prompt, user_prompt).strip()
+    for user_prompt in user_prompts:
+        completion = llm.generate(prompt_templates.system_prompt, user_prompt).strip()
         if not completion:
             raise ValueError(f"empty LLM response for entry {change.entry_id!r}")
         completions.append(completion)
