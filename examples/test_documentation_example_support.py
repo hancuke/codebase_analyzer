@@ -4,20 +4,25 @@ from unittest.mock import Mock, call
 import pytest
 
 from documentation_example_support import (
-    _load_entry_prompts,
+    _load_prompt_templates,
     _read_vba_source,
     affected_entries_for_form,
     affected_entries_by_form,
     DemoLlmClient,
     DocumentPublisher,
-    EntryPromptTemplates,
+    PromptTemplates,
     form_source_ids_to_analyze,
     generate_entry_document,
     publish_documents_for_forms,
     write_source,
 )
-from initial_oracle_documentation import _entry_changes_for_scan
+from initial_oracle_documentation import (
+    _function_changes_for_scan,
+    _publish_documents,
+    reachable_dependency_paths_and_functions,
+)
 from change_analyzer import ChangeType, EntryChange
+from codegraph import Codebase, OraclePlsqlAnalyzer, SourceFile
 from filetracker import FileTracker
 
 
@@ -181,13 +186,13 @@ def _prompt_directories(tmp_path: Path) -> tuple[Path, Path]:
     return system_directory, user_directory
 
 
-def test_load_entry_prompts_returns_unformatted_templates(tmp_path: Path) -> None:
+def test_load_prompt_templates_returns_unformatted_templates(tmp_path: Path) -> None:
     system_directory, user_directory = _prompt_directories(tmp_path)
     (user_directory / "01-first.user.template").write_text(
         "{entry_id}: {code}{history}", encoding="utf-8"
     )
 
-    assert _load_entry_prompts(system_directory, user_directory) == EntryPromptTemplates(
+    assert _load_prompt_templates(system_directory, user_directory) == PromptTemplates(
         "Shared",
         ("{entry_id}: {code}{history}",),
     )
@@ -371,12 +376,129 @@ def test_oracle_second_scan_maps_intermediate_change_to_entry(
         "END audit_pkg;\n",
     )
 
-    changes = _entry_changes_for_scan(tmp_path, tracker.scan())
+    changes = _function_changes_for_scan(tmp_path, tracker.scan())
 
-    assert [change.entry_id for change in changes] == [
-        "plsql:orders:save_order"
+    assert [change.function_id for change in changes] == [
+        "plsql:audit_pkg:write_log"
     ]
     assert [
         (item.function_id, item.change_type)
-        for item in changes[0].function_changes
+        for item in changes
     ] == [("plsql:audit_pkg:write_log", ChangeType.MODIFIED)]
+
+
+def test_oracle_initial_scan_includes_functions_without_entry_points(
+    tmp_path: Path,
+) -> None:
+    write_source(
+        tmp_path,
+        "orders.pkb",
+        "CREATE OR REPLACE PACKAGE BODY orders AS\n"
+        "    PROCEDURE save_order(p_id NUMBER) IS\n"
+        "    BEGIN\n"
+        "        audit_pkg.write_log(p_id);\n"
+        "    END save_order;\n"
+        "END orders;\n",
+    )
+    write_source(
+        tmp_path,
+        "audit.pkb",
+        "CREATE OR REPLACE PACKAGE BODY audit_pkg AS\n"
+        "    PROCEDURE write_log(p_id NUMBER) IS\n"
+        "    BEGIN\n"
+        "        NULL;\n"
+        "    END write_log;\n"
+        "END audit_pkg;\n",
+    )
+    tracker = FileTracker(str(tmp_path))
+
+    changes = _function_changes_for_scan(tmp_path, tracker.scan())
+
+    assert [change.function_id for change in changes] == [
+        "plsql:audit_pkg:write_log",
+        "plsql:orders:save_order",
+    ]
+    assert all(change.new_function is not None for change in changes)
+    publisher = DocumentPublisher(tmp_path / "published")
+
+    assert _publish_documents(changes, publisher, DemoLlmClient()) == (
+        "docs/audit.md",
+        "docs/orders.md",
+    )
+    assert publisher.read_fragment(
+        "docs/audit.md",
+        "function:plsql:audit_pkg:write_log",
+    )
+    assert publisher.read_fragment(
+        "docs/orders.md",
+        "function:plsql:orders:save_order",
+    )
+
+
+def test_reachable_dependency_context_returns_paths_and_function_code(
+    tmp_path: Path,
+) -> None:
+    write_source(
+        tmp_path,
+        "orders.pkb",
+        "CREATE OR REPLACE PACKAGE BODY orders AS\n"
+        "    PROCEDURE save_order(p_id NUMBER) IS\n"
+        "    BEGIN\n"
+        "        audit_pkg.write_log(p_id);\n"
+        "    END save_order;\n"
+        "END orders;\n",
+    )
+    write_source(
+        tmp_path,
+        "audit.pkb",
+        "CREATE OR REPLACE PACKAGE BODY audit_pkg AS\n"
+        "    PROCEDURE write_log(p_id NUMBER) IS\n"
+        "    BEGIN\n"
+        "        sink_pkg.write_line(p_id);\n"
+        "    END write_log;\n"
+        "END audit_pkg;\n",
+    )
+    write_source(
+        tmp_path,
+        "sink.pkb",
+        "CREATE OR REPLACE PACKAGE BODY sink_pkg AS\n"
+        "    PROCEDURE write_line(p_id NUMBER) IS\n"
+        "    BEGIN\n"
+        "        NULL;\n"
+        "    END write_line;\n"
+        "END sink_pkg;\n",
+    )
+    codebase = Codebase.analyze(
+        tuple(
+            SourceFile(
+                source_id=path.name,
+                content=path.read_text(encoding="utf-8"),
+                language="plsql",
+            )
+            for path in sorted(tmp_path.glob("*.pkb"))
+        ),
+        [OraclePlsqlAnalyzer()],
+    )
+
+    paths, dependencies = reachable_dependency_paths_and_functions(
+        codebase,
+        "plsql:orders:save_order",
+    )
+
+    assert paths == (
+        ("plsql:orders:save_order", "plsql:audit_pkg:write_log"),
+        (
+            "plsql:orders:save_order",
+            "plsql:audit_pkg:write_log",
+            "plsql:sink_pkg:write_line",
+        ),
+    )
+    assert [
+        (function.id, function.source_id)
+        for function in dependencies
+    ] == [
+        ("plsql:audit_pkg:write_log", "audit.pkb"),
+        ("plsql:sink_pkg:write_line", "sink.pkb"),
+    ]
+    assert "sink_pkg.write_line(p_id);" in dependencies[0].source
+    assert "NULL;" in dependencies[1].source

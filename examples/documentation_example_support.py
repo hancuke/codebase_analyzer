@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from change_analyzer import EntryChange, analyze_changes, entry_changes
+from change_analyzer import EntryChange, FunctionChange, analyze_changes, entry_changes
 from codegraph import SourceFile, VbaAnalyzer
 from document_updater import DocumentResult, ResultKind, apply_result, get_fragment_markdown
 from filetracker import ChangeSet, ContentSnapshot, FileChange
@@ -34,7 +34,10 @@ class DemoLlmClient:
     """A deterministic stand-in for a real LLM provider adapter."""
 
     def generate(self, system_prompt: str, user_prompt: str) -> str:
-        entry_id = user_prompt.split("<Entry>\n", 1)[1].split("\n</Entry>", 1)[0]
+        identifier_tag = "Function" if "<Function>\n" in user_prompt else "Entry"
+        identifier = user_prompt.split(
+            f"<{identifier_tag}>\n", 1
+        )[1].split(f"\n</{identifier_tag}>", 1)[0]
         if user_prompt.startswith("Extract the business flow."):
             code = user_prompt.split("<Code>\n", 1)[1].split("\n</Code>", 1)[0]
             implementation_line = next(
@@ -47,23 +50,23 @@ class DemoLlmClient:
                 "No result is assigned.",
             )
             return (
-                f"## {entry_id.rsplit(':', 1)[-1]}\n\n"
-                f"This generated fragment documents `{entry_id}`.\n\n"
+                f"## {identifier.rsplit(':', 1)[-1]}\n\n"
+                f"This generated fragment documents `{identifier}`.\n\n"
                 f"Current implementation: `{implementation_line}`."
             )
         return "### Boundaries\n\nValidation failures prevent the operation."
 
 
 @dataclass(frozen=True)
-class EntryPromptTemplates:
+class PromptTemplates:
     system_prompt: str
     user_templates: tuple[str, ...]
 
 
-def _load_entry_prompts(
+def _load_prompt_templates(
     system_directory: Path,
     user_directory: Path,
-) -> EntryPromptTemplates:
+) -> PromptTemplates:
     if system_directory.resolve() == user_directory.resolve():
         raise ValueError("system and user prompt directories must differ")
 
@@ -86,7 +89,7 @@ def _load_entry_prompts(
         if not template.strip():
             raise ValueError(f"empty prompt file: {user_file}")
         templates.append(template)
-    return EntryPromptTemplates(system_prompt, tuple(templates))
+    return PromptTemplates(system_prompt, tuple(templates))
 
 
 def generate_entry_document(
@@ -117,7 +120,7 @@ def generate_entry_document(
             f"\n\n<ChangeSummary>\n{summary}\n</ChangeSummary>"
         )
 
-    prompt_templates = _load_entry_prompts(
+    prompt_templates = _load_prompt_templates(
         system_directory, user_directory
     )
     user_prompts = tuple(
@@ -130,6 +133,54 @@ def generate_entry_document(
         completion = llm.generate(prompt_templates.system_prompt, user_prompt).strip()
         if not completion:
             raise ValueError(f"empty LLM response for entry {change.entry_id!r}")
+        completions.append(completion)
+    return DocumentResult(
+        fragment_id, ResultKind.UPSERT, "\n\n".join(completions)
+    )
+
+
+def generate_function_document(
+    change: FunctionChange,
+    *,
+    fragment_id: str,
+    existing_markdown: str | None,
+    llm: LlmClient,
+    system_directory: Path = (
+        Path(__file__).with_name("prompts") / "function" / "system"
+    ),
+    user_directory: Path = (
+        Path(__file__).with_name("prompts") / "function" / "user"
+    ),
+) -> DocumentResult:
+    """Generate one function fragment, or delete it when the function was removed."""
+    function = change.new_function
+    if function is None:
+        return DocumentResult(fragment_id, ResultKind.DELETE)
+
+    history = ""
+    if existing_markdown is not None:
+        history = (
+            f"\n\n<ExistingFragment>\n{existing_markdown}\n</ExistingFragment>"
+            f"\n\n<ChangeSummary>\n{change.diff}\n</ChangeSummary>"
+        )
+
+    prompt_templates = _load_prompt_templates(system_directory, user_directory)
+    user_prompts = tuple(
+        template.format(
+            function_id=change.function_id,
+            code=function.source,
+            history=history,
+        )
+        for template in prompt_templates.user_templates
+    )
+
+    completions: list[str] = []
+    for user_prompt in user_prompts:
+        completion = llm.generate(prompt_templates.system_prompt, user_prompt).strip()
+        if not completion:
+            raise ValueError(
+                f"empty LLM response for function {change.function_id!r}"
+            )
         completions.append(completion)
     return DocumentResult(
         fragment_id, ResultKind.UPSERT, "\n\n".join(completions)
@@ -377,6 +428,30 @@ def document_results_for_entries(
         )
         for change in changes
     )
+
+
+def document_results_for_functions(
+    changes: Iterable[FunctionChange],
+    document_key: str,
+    publisher: DocumentPublisher,
+    llm: LlmClient,
+) -> tuple[DocumentResult, ...]:
+    """Generate one fragment for each changed function in a source document."""
+    results = []
+    for change in changes:
+        fragment_id = f"function:{change.function_id}"
+        results.append(
+            generate_function_document(
+                change,
+                fragment_id=fragment_id,
+                existing_markdown=publisher.read_fragment(
+                    document_key,
+                    fragment_id,
+                ),
+                llm=llm,
+            )
+        )
+    return tuple(results)
 
 
 def publish_documents_for_forms(

@@ -6,12 +6,12 @@ import tempfile
 from collections import defaultdict
 from pathlib import Path
 
-from change_analyzer import EntryChange, analyze_changes, entry_changes
-from codegraph import OraclePlsqlAnalyzer, SourceFile
+from change_analyzer import FunctionChange, analyze_changes
+from codegraph import Codebase, Function, OraclePlsqlAnalyzer, SourceFile
 from documentation_example_support import (
     DemoLlmClient,
     DocumentPublisher,
-    document_results_for_entries,
+    document_results_for_functions,
     write_source,
 )
 from filetracker import ChangeSet, FileTracker
@@ -40,39 +40,37 @@ def _document_key(source_id: str) -> str:
     return f"docs/{Path(source_id).with_suffix('.md').as_posix()}"
 
 
-def _entry_changes_for_scan(
+def _function_changes_for_scan(
     source_root: Path,
     change_set: ChangeSet,
-) -> tuple[EntryChange, ...]:
-     
+) -> tuple[FunctionChange, ...]:
     report = analyze_changes(
         change_set,
         _working_sources(source_root),
-        [OraclePlsqlAnalyzer()] 
+        [OraclePlsqlAnalyzer()],
     )
-    return entry_changes(report)
+    return report.function_changes
 
 
 def _publish_documents(
-    changes,
+    changes: tuple[FunctionChange, ...],
     publisher: DocumentPublisher,
     llm: DemoLlmClient,
 ) -> tuple[str, ...]:
     changes_by_document = defaultdict(list)
     for change in changes:
-        if change.new_entry is None or change.new_context is None:
-            continue
-        source_id = next(
-            function.source_id
-            for function in change.new_context.functions
-            if function.id == change.entry_id
-        )
+        function = change.new_function or change.old_function
+        if function is None:
+            raise ValueError(
+                f"function change {change.function_id!r} has no function data"
+            )
+        source_id = function.source_id
         changes_by_document[_document_key(source_id)].append(change)
 
     updated = []
     for document_key, document_changes in sorted(changes_by_document.items()):
-        results = document_results_for_entries(
-            sorted(document_changes, key=lambda change: change.entry_id),
+        results = document_results_for_functions(
+            sorted(document_changes, key=lambda change: change.function_id),
             document_key,
             publisher,
             llm,
@@ -80,6 +78,24 @@ def _publish_documents(
         if publisher.publish(document_key, results):
             updated.append(document_key)
     return tuple(updated)
+
+
+def reachable_dependency_paths_and_functions(
+    codebase: Codebase,
+    function_id: str,
+) -> tuple[tuple[tuple[str, ...], ...], tuple[Function, ...]]:
+    """Return deterministic dependency paths and their functions for one function.
+
+    Each returned Function includes its source-file ID and source code. Paths contain
+    function IDs and start at the requested function.
+    """
+    context = codebase.dependency_context(function_id)
+    dependencies = tuple(
+        function for function in context.functions if function.id != function_id
+    )
+    dependency_ids = {function.id for function in dependencies}
+    paths = tuple(path for path in context.paths if path[-1] in dependency_ids)
+    return paths, dependencies
 
 
 def main() -> None:
@@ -121,9 +137,9 @@ def main() -> None:
         change_set = tracker.scan()
         publisher = DocumentPublisher(document_root)
         llm = DemoLlmClient()
-        changes = _entry_changes_for_scan(source_root, change_set)
+        changes = _function_changes_for_scan(source_root, change_set)
 
-        print("Initial PL/SQL entries:", [change.entry_id for change in changes])
+        print("Initial PL/SQL functions:", [change.function_id for change in changes])
         updated_document_keys = _publish_documents(changes, publisher, llm)
         print("Initially updated documents:", updated_document_keys)
         tracker.commit(
@@ -144,10 +160,10 @@ def main() -> None:
         )
 
         change_set = tracker.scan()
-        changes = _entry_changes_for_scan(source_root, change_set)
+        changes = _function_changes_for_scan(source_root, change_set)
         print(
-            "Entries affected by audit change:",
-            [change.entry_id for change in changes],
+            "Functions changed by audit change:",
+            [change.function_id for change in changes],
         )
         incrementally_updated_keys = _publish_documents(changes, publisher, llm)
         print("Incrementally updated documents:", incrementally_updated_keys)
