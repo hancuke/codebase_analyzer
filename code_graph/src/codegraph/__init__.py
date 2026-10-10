@@ -12,6 +12,14 @@ from .model import (
     SourceRange,
 )
 from .oracle import OraclePlsqlAnalyzer
+from .plsql_complexity import (
+    PlsqlComplexityAssessment,
+    PlsqlAnalysisMode,
+    PlsqlWorkloadEvidence,
+    PlsqlWorkloadMetrics,
+    PlsqlWorkloadReason,
+    assess_plsql_complexity,
+)
 from .vba import VbaAnalyzer
 
 __all__ = [
@@ -32,4 +40,10 @@ __all__ = [
     "SourceRange",
     "VbaAnalyzer",
     "OraclePlsqlAnalyzer",
+    "PlsqlComplexityAssessment",
+    "PlsqlAnalysisMode",
+    "PlsqlWorkloadEvidence",
+    "PlsqlWorkloadMetrics",
+    "PlsqlWorkloadReason",
+    "assess_plsql_complexity",
 ]

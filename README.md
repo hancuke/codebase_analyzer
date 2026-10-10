@@ -51,6 +51,65 @@ changes = entry_changes(report)
 old/new path evidence。Entry 查找使用 baseline 和 working 两张图的反向可达并集，因此删除的依赖和
 新增的依赖都会影响正确的 Entry。
 
+### Local PL/SQL analysis workload
+
+独立函数 `assess_plsql_complexity(source)` 接受单个完整 PL/SQL function/procedure 的源码，
+估算小模型解释业务所需的分析工作量，建议单轮或多轮分析。不调用 LLM、不追踪被调用函数。
+
+```python
+from codegraph import PlsqlAnalysisMode, assess_plsql_complexity
+
+assessment = assess_plsql_complexity(function.source)
+mode = assessment.mode  # SINGLE_PASS / MULTI_PASS
+prompt_kind = "multi_pass" if mode is PlsqlAnalysisMode.MULTI_PASS else "single_pass"
+logical_length = assessment.metrics.logical_units
+for item in assessment.evidence:
+    print(item.reason.value, item.points)
+# Caller owns prompt selection, LLM execution and multi-pass synthesis.
+```
+
+结果是 frozen `PlsqlComplexityAssessment`，包含枚举 `mode`、`score`、
+frozen `PlsqlWorkloadMetrics` 和不可变 `evidence`，不返回 diagnostics。
+计分证据用 `PlsqlWorkloadReason` 表达原因，`points` 表达贡献；结构上限以负贡献体现，
+短源码保护以零分原因体现。证据按固定顺序返回。
+
+有效逻辑长度 E 和调整后的代码行数 A 共同表达长度：普通执行语句、分支和循环头各计 1，
+简单直接赋值和声明计 0.25，NULL 和块结束符不计。
+普通 DML 或初始查询块计 1，宽表字段和值列表不按字段数累加。
+JOIN、额外查询块、集合运算、GROUP BY/HAVING、聚合和窗口表达式各加 1；
+非直接映射的 SET/VALUES/SELECT 表达式按逻辑表达式计量。
+复杂表达式按每 20 个词法 token 向上取整，已计量的 CASE/查询/聚合/窗口表达式不重复计。
+参数/返回类型签名和块分隔符不增加 E；Oracle CASE 的 WHEN 计为决策分支。
+
+```text
+结构原始分 = 2 × 决策数 + 循环数 + 3 × 嵌套控制单位
+           + 2 × SQL 结构数 + 游标声明数 + 不同 FETCH 游标数 + 异常处理分支数
+R = min(30, 结构原始分)
+P = min(10, 非空非注释物理代码行数 / 50)
+score = max(E, A) + R + P
+```
+
+嵌套控制单位为每个 IF/CASE/LOOP 开始时 `max(0, 控制深度 - 1)` 的总和，
+普通 BEGIN 块不增加控制深度。SQL 结构数不包含已经计为决策的 CASE。
+INSERT SELECT 和 MERGE 中的 DML 不重复算顶层语句。
+注释、字符串（含 Oracle q quoting）和带引号标识符不参与关键词匹配。
+调整后的代码行数 A 从非空非注释代码行数中扣除普通 DML 的字段和值映射续行；
+含 CASE、SELECT、非直接映射或 SQL 结构的语句不压缩，WHERE 等后续条件保留。
+同一行还有其他代码时不扣除。E 不受排版影响，A 和最终分数会受排版影响。
+完整物理行数仍用于弱修正 P；包含多行字面量的代码行仍计入物理长度。
+
+只有 **物理代码行数 <= 50 且 E <= 50** 才受单轮保护；其他源码 **score >= 100 建议 MULTI_PASS**，
+否则仍为 SINGLE_PASS。因此，一个短循环或 200 行的宽表 INSERT 不会直接触发多轮，
+但 100 个普通执行步骤即使压在一行也会升级。
+50 同时限制实际代码行数和逻辑单位。100 仍是初始工作量阈值，并非小模型能力保证：
+124 行且有多阶段校验、查询及异常分支的示例现为 156.48 分，建议多轮，
+不会再因 E=46.75 被短函数保护。需用实际模型结果继续校准阈值。
+
+单轮/多轮仅由 E 和 score 决定，不因动态 SQL、局部子程序或控制结构异常强制升级。
+动态 SQL 按普通代码计量，不分析字符串中的 SQL。输入应为完整源码；此函数不提供语法诊断，
+也不验证完整 PL/SQL 语法。未闭合的字符串、带引号标识符或注释会抛出 `ValueError`，
+避免返回截断源码的分数。此启发式不推断真实业务语义，需用实际函数和模型结果校准。
+
 ### Context to one document result
 
 ```python
