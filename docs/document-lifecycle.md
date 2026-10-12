@@ -101,3 +101,53 @@ fragment ID，随后按确定性顺序应用结果。只有生成、应用和物
 
 完整可运行示例见
 [`examples/documentation_lifecycle.py`](../examples/documentation_lifecycle.py)。
+
+## 可恢复的暂存与发布
+
+[`examples/resumable_documentation.py`](../examples/resumable_documentation.py) 将生成和正式发布分开。
+调用方使用 `run_documentation(source_root, document_root, llm, *, generation_version="demo-v1")`；
+源码目录不能包含输出目录，每个项目只允许一个 writer。模型、生成配置或分析实现变化时必须修改
+`generation_version`。此示例模块依赖同目录的 support 模块，导入时需将 `examples/` 加入 Python
+模块搜索路径。
+
+```text
+FileTracker.scan()
+  -> 读取 document_root/.resumable/manifest.json
+  -> 按 Form 校验暂存结果，跳过有效结果或重新分析、生成、合并、暂存
+  -> 全部生成完成后统一校验源码 revisions、prompt 和目标文档
+  -> 持久化 publishing 阶段，逐文件正式发布
+  -> 持久化 published 阶段
+  -> FileTracker.commit(expected revisions)
+  -> 删除自有暂存文件和 manifest，再删除空暂存目录
+```
+
+暂存目录中的 `<Form ID 的摘要>.md` 是完整最终文档，`manifest.json` 保存版本、批次阶段、
+scan revisions 和每个 Form 的输入摘要、document key、生成前正式文档摘要及目标输出摘要。
+目标摘要为 `absent` 表示文件应不存在，没有 Markdown 文件也可以是一个已完成的 Form；
+删除文档、空 Form 和没有 fragment 修改的结果都有明确记录。
+原子写入使用可识别的临时文件名，暂存目录中因进程退出留下的未认证临时文件不会作为成功结果，
+下次成功后一并清理。
+
+生成使用正式文档的历史 fragment，并在完整原文档上应用受影响 Entry 的结果，因此保留手写内容和
+未修改的 fragment。只有整个 Form 完整生成、输入校验通过且完成记录持久化后，才能被恢复跳过。
+`Skipped completed Form: ...` 表示复用有效暂存结果，`Staged Form: ...` 表示新结果已认证。
+
+不能仅凭临时文件存在就跳过。输入摘要包含项目和输出根目录、baseline revision、Form 内容、
+共享 Module、prompt 和 generation_version，不包含全局 working revision。修复失败 Form
+不会让其他有效 Form 重做；共享输入变化则使相关暂存结果失效。暂存文件缺失或被修改、正式文档被
+外部修改也会使该 Form 重新处理，并打印 `Invalidated staged Form: ...`。非法 manifest 和
+I/O、LLM 错误明确传播，不用空结果冒充成功。
+
+全部生成完成前正式文档保持不变。正式发布按 document key 的确定性顺序逐文件原子替换或删除，
+保留暂存源文件以便重试；**不提供多文件整体原子发布或回滚**。发布中断后，若正式文件仍是生成前内容，
+从暂存结果补写；若已是目标内容，不重复写入。其他外部修改不被旧结果直接覆盖，运行中发现冲突则抛出
+`RevisionConflictError`。返回值只包含本次调用实际修改的正式 document keys，包括本次跳过生成、
+但首次正式发布的暂存文档。
+
+发布或 baseline commit 失败都保留恢复数据。commit 成功而清理失败时，下一次无源码变化的运行
+校验已发布目标后只清理，不重复生成或 commit；若已有新源码变化，则淘汰旧 baseline 的暂存记录，
+按新扫描结果处理。无变化的正常重跑不创建暂存目录、不调用 LLM，也不额外推进 baseline。
+清理只处理受控暂存目录的自有文件，不删除其他输出；意外文件或符号链接会明确报错。
+
+原先的独立 `progress_path` 参数已移除，旧 `progress.json` 不迁移也不读取。四个领域包、
+`ProgressCheckpoint` 的通用 API 和其他示例的直接发布行为保持不变。

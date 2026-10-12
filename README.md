@@ -170,6 +170,14 @@ UTF-16 读取，并只将 `CodeBehindForm` 行之后的 VBA 代码交给 CodeGra
 -> publish_documents_for_forms() -> commit()`：每个 Form 是一个文档的所有者，
 其受影响 Entry 只更新该 Form 的文档；baseline 只在所有文档成功发布后由调用方推进。
 
+[`resumable_documentation.py`](examples/resumable_documentation.py) 提供可恢复的
+`run_documentation(source_root, document_root, llm, *, generation_version="demo-v1")`。
+它先把完整最终 Markdown 和摘要记录暂存到 `document_root/.resumable/`，有效结果在重启时跳过
+分析和 LLM 并打印日志。全部生成成功后才逐文件发布，随后提交 baseline 并删除暂存目录。
+生成失败不会修改正式文档；发布失败可能留下部分更新，但重试不必重新生成有效结果。
+此接口不再接受独立的 `progress_path`，也不迁移旧 `progress.json`。布局、失效规则和恢复边界见
+[`文档生命周期`](docs/document-lifecycle.md#可恢复的暂存与发布)。
+
 ## Setup and validation
 
 Python 3.10+ 与 uv 是必需条件。
@@ -177,6 +185,7 @@ Python 3.10+ 与 uv 是必需条件。
 ```bash
 uv sync --all-packages
 uv run pytest code_graph/tests file_tracker/tests change_analyzer/tests document_updater/tests
+uv run pytest examples/test_resumable_documentation.py examples/test_progress_checkpoint.py examples/test_documentation_example_support.py
 uv build --all-packages
 ```
 

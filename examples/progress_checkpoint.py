@@ -15,7 +15,8 @@ def atomic_write_text(path: Path, text: str) -> None:
     temporary_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
-            mode="w", encoding="utf-8", dir=path.parent, delete=False
+            mode="w", encoding="utf-8", dir=path.parent, delete=False,
+            prefix=f".{path.name}.", suffix=".tmp",
         ) as temporary:
             temporary_path = Path(temporary.name)
             temporary.write(text)

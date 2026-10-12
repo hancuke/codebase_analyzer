@@ -218,6 +218,22 @@ def affected_entries_for_form(
     form_source_id: str,
 ) -> tuple[EntryChange, ...]:
     """Analyze one Form with every current or deleted shared Module."""
+    return _affected_entries_for_form(
+        source_root,
+        change_set,
+        form_source_id,
+        analyzer=VbaAnalyzer(cache_size=4096),
+    )
+
+
+def _affected_entries_for_form(
+    source_root: Path,
+    change_set: ChangeSet,
+    form_source_id: str,
+    *,
+    analyzer: VbaAnalyzer,
+    module_sources: tuple[SourceFile, ...] | None = None,
+) -> tuple[EntryChange, ...]:
     context_changes = ChangeSet(
         files=tuple(
             _vba_file_change(change)
@@ -231,18 +247,18 @@ def affected_entries_for_form(
     if not context_changes.has_changes:
         return ()
 
-    working_paths = list(sorted(source_root.glob(_MODULE_FILE_GLOB)))
+    if module_sources is None:
+        module_sources = _working_module_sources(source_root)
+    working_sources = list(module_sources)
     form_path = source_root / form_source_id
     if form_path.is_file():
-        working_paths.append(form_path)
-    working_sources = tuple(
-        SourceFile(
-            source_id=path.name,
-            content=_read_vba_source(path),
-            language="vba",
+        working_sources.append(
+            SourceFile(
+                source_id=form_source_id,
+                content=_read_vba_source(form_path),
+                language="vba",
+            )
         )
-        for path in sorted(working_paths)
-    )
     source_languages = {
         change.path.as_posix(): "vba"
         for change in context_changes.files
@@ -251,7 +267,7 @@ def affected_entries_for_form(
         analyze_changes(
             context_changes,
             working_sources,
-            [VbaAnalyzer()],
+            [analyzer],
             source_languages=source_languages,
         )
     )
@@ -261,17 +277,35 @@ def affected_entries_by_form(
     source_root: Path,
     change_set: ChangeSet,
 ) -> dict[str, tuple[EntryChange, ...]]:
-    """Collect non-empty Entry changes for each Form affected by this scan."""
+    """Analyze isolated Forms, sharing Module reads and syntax facts per scan."""
+    form_source_ids = form_source_ids_to_analyze(source_root, change_set)
+    if not form_source_ids:
+        return {}
+    module_sources = _working_module_sources(source_root)
+    analyzer = VbaAnalyzer(cache_size=4096)
     changes_by_form = {}
-    for form_source_id in form_source_ids_to_analyze(source_root, change_set):
-        changes = affected_entries_for_form(
+    for form_source_id in form_source_ids:
+        changes = _affected_entries_for_form(
             source_root,
             change_set,
             form_source_id,
+            analyzer=analyzer,
+            module_sources=module_sources,
         )
         if changes:
             changes_by_form[form_source_id] = changes
     return changes_by_form
+
+
+def _working_module_sources(source_root: Path) -> tuple[SourceFile, ...]:
+    return tuple(
+        SourceFile(
+            source_id=path.name,
+            content=_read_vba_source(path),
+            language="vba",
+        )
+        for path in sorted(source_root.glob(_MODULE_FILE_GLOB))
+    )
 
 
 # VBA export adaptation

@@ -41,6 +41,30 @@ Each file must be supported by exactly one analyzer. Unsupported files, ambiguou
 analyzer ownership, duplicate source identifiers, parse problems, and unresolved calls are reported
 through `codebase.diagnostics`. Reliable results from other files remain available.
 
+## Reuse VBA syntax analysis
+
+Use the same analyzer instance for related snapshots or batches:
+
+```python
+analyzer = VbaAnalyzer(cache_size=4096)
+baseline = Codebase.analyze(baseline_files, [analyzer])
+working = Codebase.analyze(working_files, [analyzer])
+analyzer.clear_cache()
+```
+
+`cache_size` is a non-negative integer, defaulting to `0` (disabled). It limits each
+of two instance-local LRU caches independently: function extraction and raw call
+extraction. Limits count entries, not bytes. No cache is shared between analyzers.
+Source identity and complete content key function extraction; procedure content and
+one-based start line key raw calls. Changed content or line positions cannot reuse
+stale facts. Returned lists and raw-call contexts are independent of cached data.
+
+Only syntax facts, including parse diagnostics, are cached. Name resolution,
+unresolved-call diagnostics, entry detection, and graph construction run for every
+batch, so different symbol scopes remain independent. Reuse may span scans when the
+caller retains the analyzer; `clear_cache()` releases retained syntax without
+affecting existing immutable `Codebase` snapshots.
+
 ## Inspect diagnostics
 
 ```python

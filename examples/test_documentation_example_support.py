@@ -3,6 +3,7 @@ from unittest.mock import Mock, call
 
 import pytest
 
+import documentation_example_support as support
 from documentation_example_support import (
     _load_prompt_templates,
     _read_vba_source,
@@ -22,7 +23,7 @@ from initial_oracle_documentation import (
     reachable_dependency_paths_and_functions,
 )
 from change_analyzer import ChangeType, EntryChange
-from codegraph import Codebase, OraclePlsqlAnalyzer, SourceFile
+from codegraph import Codebase, OraclePlsqlAnalyzer, SourceFile, VbaAnalyzer
 from filetracker import FileTracker
 
 
@@ -146,6 +147,121 @@ def test_affected_entries_by_form_includes_each_form_for_shared_module_change(
 
     assert list(changes_by_form) == ["Form_1.txt", "Form_2.txt"]
     assert all(changes_by_form.values())
+
+
+@pytest.mark.parametrize("phase", ["initial", "modified", "deleted"])
+def test_form_batch_reuses_syntax_without_sharing_resolution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str
+) -> None:
+    write_source(
+        tmp_path,
+        "Form_1.txt",
+        "CodeBehindForm\nPrivate Sub Save_Click()\n"
+        "    Call SharedWork\nEnd Sub\n"
+        "Private Sub LocalWork()\nEnd Sub\n",
+    )
+    write_source(
+        tmp_path,
+        "Form_2.txt",
+        "CodeBehindForm\nPrivate Sub Save_Click()\n"
+        "    Call SharedWork\nEnd Sub\n",
+    )
+    write_source(
+        tmp_path,
+        "Module_1.txt",
+        "Public Sub SharedWork()\n    Call LocalWork\n"
+        "    result = 1\nEnd Sub\n",
+    )
+    tracker = FileTracker(str(tmp_path))
+    if phase != "initial":
+        tracker.commit(message="baseline")
+        if phase == "modified":
+            write_source(
+                tmp_path,
+                "Module_1.txt",
+                "\n\nPublic Sub SharedWork()\n    Call LocalWork\n"
+                "    result = 2\nEnd Sub\n",
+            )
+        else:
+            (tmp_path / "Module_1.txt").unlink()
+    change_set = tracker.scan()
+    expected = {
+        form_id: affected_entries_for_form(tmp_path, change_set, form_id)
+        for form_id in ("Form_1.txt", "Form_2.txt")
+    }
+    read = Mock(wraps=support._read_vba_source)
+    extract_functions = VbaAnalyzer._parse_functions
+    extract_raw_calls = VbaAnalyzer._parse_raw_calls
+    parsed_sources = []
+    parsed_calls = []
+
+    def functions(analyzer, source):
+        parsed_sources.append(source)
+        return extract_functions(analyzer, source)
+
+    def raw_calls(analyzer, source, start_line):
+        parsed_calls.append((source, start_line))
+        return extract_raw_calls(analyzer, source, start_line)
+
+    monkeypatch.setattr(support, "_read_vba_source", read)
+    monkeypatch.setattr(VbaAnalyzer, "_parse_functions", functions)
+    monkeypatch.setattr(VbaAnalyzer, "_parse_raw_calls", raw_calls)
+
+    actual = affected_entries_by_form(tmp_path, change_set)
+
+    assert actual == expected
+    assert len(parsed_sources) == len(set(parsed_sources))
+    assert len(parsed_calls) == len(set(parsed_calls))
+    assert len(parsed_sources) == (3 if phase != "modified" else 4)
+    assert len(parsed_calls) == (3 if phase != "modified" else 4)
+    assert read.call_count == (2 if phase == "deleted" else 3)
+    assert read.call_args_list.count(call(tmp_path / "Module_1.txt")) == (
+        0 if phase == "deleted" else 1
+    )
+    side = "old_context" if phase == "deleted" else "new_context"
+    first_context = getattr(actual["Form_1.txt"][0], side)
+    second_context = getattr(actual["Form_2.txt"][0], side)
+    assert first_context is not None
+    assert second_context is not None
+    assert "vba:Form_1:LocalWork" in {
+        function.id for function in first_context.functions
+    }
+    assert "vba:Form_1:LocalWork" not in {
+        function.id for function in second_context.functions
+    }
+    assert any(
+        diagnostic.code == "unresolved_call"
+        and diagnostic.function_id == "vba:Module_1:SharedWork"
+        for diagnostic in second_context.diagnostics
+    )
+
+
+def test_form_batch_does_not_reuse_sources_across_scans(tmp_path: Path) -> None:
+    _write_form(tmp_path)
+    write_source(
+        tmp_path, "Module_1.txt", "Public Sub SharedWork()\nEnd Sub\n"
+    )
+    tracker = FileTracker(str(tmp_path))
+    initial = affected_entries_by_form(tmp_path, tracker.scan())
+    tracker.commit(message="baseline")
+    write_source(
+        tmp_path,
+        "Module_1.txt",
+        "Public Sub SharedWork()\n    Call Missing\nEnd Sub\n",
+    )
+
+    updated = affected_entries_by_form(tmp_path, tracker.scan())
+
+    initial_context = initial["Form_1.txt"][0].new_context
+    updated_context = updated["Form_1.txt"][0].new_context
+    assert initial_context is not None
+    assert updated_context is not None
+    assert initial_context.diagnostics == ()
+    assert any(
+        diagnostic.code == "unresolved_call"
+        and diagnostic.function_id == "vba:Module_1:SharedWork"
+        for diagnostic in updated_context.diagnostics
+    )
 
 
 def test_publish_documents_for_forms_returns_changed_document_keys(

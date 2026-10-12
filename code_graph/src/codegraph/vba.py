@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from functools import lru_cache
 from pathlib import PurePath
 
 from pygments.lexers import get_lexer_by_name
@@ -45,15 +46,35 @@ _CONTROL_WORDS = {
 
 
 class VbaAnalyzer(BaseAnalyzer):
-    """A VBA analyzer built on the standard BaseAnalyzer pipeline."""
+    """Analyze VBA with optional instance-local, bounded syntax caches."""
 
     language_name = "vba"
     file_extensions = {".bas", ".cls", ".frm"}
     is_case_sensitive = False
 
+    def __init__(self, *, cache_size: int = 0) -> None:
+        """Limit each syntax cache to cache_size entries; zero disables reuse."""
+        if isinstance(cache_size, bool) or not isinstance(cache_size, int):
+            raise TypeError("cache_size must be a non-negative integer")
+        if cache_size < 0:
+            raise ValueError("cache_size must be a non-negative integer")
+        self._cached_functions = lru_cache(maxsize=cache_size)(self._parse_functions)
+        self._cached_raw_calls = lru_cache(maxsize=cache_size)(self._parse_raw_calls)
+
+    def clear_cache(self) -> None:
+        """Release cached syntax facts without changing existing snapshots."""
+        self._cached_functions.cache_clear()
+        self._cached_raw_calls.cache_clear()
+
     def extract_functions(
         self, source_file: SourceFile
     ) -> tuple[list[Function], list[Diagnostic]]:
+        functions, diagnostics = self._cached_functions(source_file)
+        return list(functions), list(diagnostics)
+
+    def _parse_functions(
+        self, source_file: SourceFile
+    ) -> tuple[tuple[Function, ...], tuple[Diagnostic, ...]]:
         lines = source_file.content.splitlines(keepends=True)
         functions: list[Function] = []
         diagnostics: list[Diagnostic] = []
@@ -84,23 +105,37 @@ class VbaAnalyzer(BaseAnalyzer):
                     line=start + 1,
                 )
             )
-        return functions, diagnostics
+        return tuple(functions), tuple(diagnostics)
 
     def extract_raw_calls(self, function: Function) -> list[RawCall]:
+        """Return fresh raw calls, reusing only context-independent syntax."""
+        return [
+            RawCall(name=name, line=line)
+            for name, line in self._cached_raw_calls(
+                function.source, function.source_range.start_line
+            )
+        ]
+
+    def _parse_raw_calls(
+        self, source: str, start_line: int
+    ) -> tuple[tuple[str, int], ...]:
         """Extract likely VBA calls from Pygments tokens.
 
         Pygments handles comments and strings as separate token types. This
         method only applies lightweight call-position rules; name resolution
         remains the responsibility of BaseAnalyzer.
         """
-        calls: list[RawCall] = []
+        calls: list[tuple[str, int]] = []
         lexer = get_lexer_by_name("vb.net")
-        token_stream = [
-            (token_type, value, function.source[:position].count("\n"))
-            for position, token_type, value in lexer.get_tokens_unprocessed(
-                function.source
-            )
-        ]
+        token_stream = []
+        position = 0
+        offset = 0
+        for token_position, token_type, value in lexer.get_tokens_unprocessed(
+            source
+        ):
+            offset += source.count("\n", position, token_position)
+            token_stream.append((token_type, value, offset))
+            position = token_position
         significant = [
             item
             for item in token_stream
@@ -114,8 +149,8 @@ class VbaAnalyzer(BaseAnalyzer):
             if token_type not in Name or not re.fullmatch(r"[A-Za-z_]\w*", value):
                 continue
 
-            line = function.source_range.start_line + offset
-            if line == function.source_range.start_line:
+            line = start_line + offset
+            if line == start_line:
                 continue
 
             normalized = value.casefold()
@@ -145,8 +180,8 @@ class VbaAnalyzer(BaseAnalyzer):
             if key in seen:
                 continue
             seen.add(key)
-            calls.append(RawCall(name=value, line=line))
-        return calls
+            calls.append((value, line))
+        return tuple(calls)
 
     def detect_entry_point(self, function: Function) -> EntryPoint | None:
         if function.name.casefold().endswith("_click"):

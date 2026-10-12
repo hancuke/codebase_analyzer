@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import pytest
 
 from codegraph import (
@@ -319,3 +321,154 @@ End Function
         ("SaveOrder", 3),
         ("ValidateOrder", 4),
     ]
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_vba_call_lines_after_blank_lines_comments_and_strings(newline: str) -> None:
+    source = newline.join(
+        [
+            "",
+            "Public Sub Main()",
+            "",
+            "    ' Call Ignored",
+            '    message = "Ignored()"',
+            "",
+            "    Call Helper",
+            "    result = Helper()",
+            "End Sub",
+            "",
+            "Public Function Helper()",
+            "End Function",
+        ]
+    )
+    codebase = Codebase.analyze(
+        [SourceFile("modCalls.bas", source)], [VbaAnalyzer()]
+    )
+
+    calls = codebase.calls_from("vba:modCalls:Main")
+    assert [(call.name, call.line) for call in calls] == [
+        ("Helper", 7),
+        ("Helper", 8),
+    ]
+
+
+class _CountingVbaAnalyzer(VbaAnalyzer):
+    def __init__(self, *, cache_size: int = 0) -> None:
+        self.function_parses = 0
+        self.call_parses = 0
+        super().__init__(cache_size=cache_size)
+
+    def _parse_functions(
+        self, source_file: SourceFile
+    ) -> tuple[tuple[Function, ...], tuple[Diagnostic, ...]]:
+        self.function_parses += 1
+        return super()._parse_functions(source_file)
+
+    def _parse_raw_calls(
+        self, source: str, start_line: int
+    ) -> tuple[tuple[str, int], ...]:
+        self.call_parses += 1
+        return super()._parse_raw_calls(source, start_line)
+
+
+@pytest.mark.parametrize(("cache_size", "expected_parses"), [(0, 4), (1, 3), (2, 2)])
+def test_vba_cache_is_bounded_instance_local_and_clearable(
+    cache_size: int, expected_parses: int
+) -> None:
+    analyzer = _CountingVbaAnalyzer(cache_size=cache_size)
+    first = SourceFile("first.bas", "Sub First()\nCall Missing\nEnd Sub\n")
+    second = SourceFile("second.bas", "Sub Second()\nCall Missing\nEnd Sub\n")
+    snapshots = [
+        Codebase.analyze([source], [analyzer])
+        for source in (first, second, first, first)
+    ]
+    assert analyzer.function_parses == expected_parses
+    assert analyzer.call_parses == expected_parses
+
+    independent = _CountingVbaAnalyzer(cache_size=cache_size)
+    Codebase.analyze([first], [independent])
+    assert independent.function_parses == independent.call_parses == 1
+
+    analyzer.clear_cache()
+    rebuilt = Codebase.analyze([first], [analyzer])
+    assert analyzer.function_parses == expected_parses + 1
+    assert analyzer.call_parses == expected_parses + 1
+    assert rebuilt.functions == snapshots[0].functions
+    assert rebuilt.diagnostics == snapshots[0].diagnostics
+
+
+def test_vba_cache_keeps_symbol_resolution_independent() -> None:
+    analyzer = _CountingVbaAnalyzer(cache_size=16)
+    caller = SourceFile("caller.bas", "Sub Run_Click()\nCall Helper\nEnd Sub\n")
+    helper = SourceFile("helper.bas", "Sub Helper()\nEnd Sub\n")
+    duplicate = SourceFile("other.bas", helper.content)
+    resolved = Codebase.analyze([caller, helper], [analyzer])
+    unresolved = Codebase.analyze([caller], [analyzer])
+    ambiguous = Codebase.analyze([caller, helper, duplicate], [analyzer])
+    resolved_again = Codebase.analyze([caller, helper], [analyzer])
+
+    assert analyzer.function_parses == 3
+    assert analyzer.call_parses == 2
+    assert resolved.calls_from("vba:caller:Run_Click")[0].target_id == "vba:helper:Helper"
+    assert unresolved.calls_from("vba:caller:Run_Click")[0].target_id is None
+    assert ambiguous.calls_from("vba:caller:Run_Click")[0].target_id is None
+    assert "no indexed" in unresolved.diagnostics[0].message
+    assert "more than one" in ambiguous.diagnostics[0].message
+    assert resolved_again.calls_from("vba:caller:Run_Click") == resolved.calls_from(
+        "vba:caller:Run_Click"
+    )
+    assert resolved_again.diagnostics == ()
+
+
+def test_vba_cache_handles_content_identity_and_line_changes() -> None:
+    analyzer = _CountingVbaAnalyzer(cache_size=16)
+    source = SourceFile("caller.bas", "Sub Run()\nCall First\nEnd Sub\n")
+    original = Codebase.analyze([source], [analyzer])
+    modified = Codebase.analyze(
+        [replace(source, content=source.content.replace("First", "Second"))],
+        [analyzer],
+    )
+    shifted = Codebase.analyze(
+        [replace(source, content="\n\n" + source.content)], [analyzer]
+    )
+    renamed = Codebase.analyze([replace(source, source_id="renamed.bas")], [analyzer])
+    broken = replace(source, content="Sub Run()\n")
+    for _ in range(2):
+        functions, diagnostics = analyzer.extract_functions(broken)
+        assert functions == []
+        assert diagnostics[0].code == "unterminated_procedure"
+    assert analyzer.function_parses == 5
+    assert analyzer.call_parses == 3
+    assert [(call.name, call.line) for call in original.calls_from("vba:caller:Run")] == [
+        ("First", 2)
+    ]
+    assert modified.calls_from("vba:caller:Run")[0].name == "Second"
+    assert shifted.calls_from("vba:caller:Run")[0].line == 4
+    assert renamed.functions[0].source_id == "renamed.bas"
+    assert renamed.calls_from("vba:renamed:Run")[0].name == "First"
+
+
+def test_vba_cache_does_not_expose_mutable_cached_results() -> None:
+    analyzer = _CountingVbaAnalyzer(cache_size=4)
+    source = SourceFile("caller.bas", "Sub Run()\nCall Missing\nEnd Sub\nSub Broken()\n")
+    functions, diagnostics = analyzer.extract_functions(source)
+    function = functions[0]
+    functions.clear()
+    diagnostics.clear()
+    calls = analyzer.extract_raw_calls(function)
+    assert isinstance(calls[0].context, dict)
+    calls[0].context["caller_mutation"] = True
+    calls.clear()
+
+    functions, diagnostics = analyzer.extract_functions(source)
+    assert functions == [function]
+    assert diagnostics[0].code == "unterminated_procedure"
+    assert analyzer.extract_raw_calls(function) == [RawCall("Missing", 2)]
+    assert analyzer.function_parses == analyzer.call_parses == 1
+
+
+@pytest.mark.parametrize("cache_size", [-1, True, 1.5, None])
+def test_vba_cache_rejects_invalid_limits(cache_size) -> None:
+    error = ValueError if cache_size == -1 else TypeError
+    with pytest.raises(error, match="cache_size must be a non-negative integer"):
+        VbaAnalyzer(cache_size=cache_size)
