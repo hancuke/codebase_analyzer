@@ -35,7 +35,7 @@
 
 ## 2. Workspace 领域与依赖方向
 
-本项目是一个 `uv` workspace，包含四个职责单一的包：
+本项目是一个 `uv` workspace，包含四个基础领域包和一个高层文档编排包：
 
 | Package | 领域职责 | 不应承担的职责 |
 | --- | --- | --- |
@@ -43,22 +43,25 @@
 | `file_tracker/` | 跟踪物理文件变化、baseline transaction、内容快照和 revision 校验 | 解析语言语法、理解函数调用图、决定入口影响 |
 | `change_analyzer/` | 组合旧/新快照与 CodeGraph，计算函数变化、调用边变化和入口影响 | 修改 baseline、发布文档、执行 LLM |
 | `document_updater/` | 提供文档 authoring、确定性文档计划和 Markdown fragment mutation | 重新分析源码、推断代码依赖、拥有文件变更事实 |
+| `document_workbench/` | 持久化固定输入、文档单元计划和完成结果，支持恢复 | 扫描、分析、文档生成/发布、FileTracker |
 
 允许的高层依赖方向：
 
 ```text
-file_tracker       code_graph
-      \             /
-       change_analyzer
-              |
-       document_updater
+code_graph + file_tracker
+        -> change_analyzer -> language caller
+language caller -> document_updater
+language caller -> document_workbench (persistent run checkpoints)
 ```
 
 必须保持依赖单向：
 
 - `code_graph` 与 `file_tracker` 是相互独立的基础领域。
 - `change_analyzer` 可以组合二者，但基础领域不得反向依赖它。
-- `document_updater` 可以消费 change-analysis 结果，但其他包不得依赖文档或 LLM 模型。
+- `document_updater` 保持纯 fragment mutation。`document_workbench` 只持久化调用方提供的输入、
+  文档单元和结果，不依赖 `file_tracker`、`document_updater`、analyzer 或 LLM。
+- 调用方负责扫描、分析和按目标文档分组；一个目标文档的完整结果保存后标记该单元完成。
+  恢复时跳过已完成单元并继续处理其他单元。
 - 跨包共享行为应通过最小公共类型或协议表达，不得通过导入内部实现来绕过边界。
 
 ## 3. 模块和接口设计规则
@@ -148,7 +151,7 @@ file_tracker       code_graph
 
 ```bash
 uv sync --all-packages
-uv run pytest code_graph/tests file_tracker/tests change_analyzer/tests document_updater/tests
+PYTHONPATH=. uv run pytest code_graph/tests file_tracker/tests change_analyzer/tests document_workbench/tests tests
 uv build --all-packages
 ```
 
@@ -157,7 +160,7 @@ uv build --all-packages
 ```bash
 uv run pytest code_graph/tests/test_codebase.py::test_vba_analysis_resolves_cross_file_and_forward_calls
 uv run pytest change_analyzer/tests/test_change_analyzer.py
-uv run pytest document_updater/tests/test_planner.py
+uv run pytest document_workbench/tests/test_workbench.py
 ```
 
 项目没有配置 lint 工具，不要擅自引入新的 lint、format 或 build 工具。修改公共模型、路由规则、图查询、

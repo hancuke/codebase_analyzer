@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
 from change_analyzer import EntryChange, FunctionChange, analyze_changes, entry_changes
 from codegraph import SourceFile, VbaAnalyzer
-from document_updater import DocumentResult, ResultKind, apply_result, get_fragment_markdown
+from document_updater import DocumentResult, ResultKind, get_fragment_markdown
 from filetracker import ChangeSet, ContentSnapshot, FileChange
 
 
@@ -399,64 +399,20 @@ def _is_module_source(source_id: str) -> bool:
     )
 
 
-# Document publication
-
-
-@dataclass(frozen=True)
-class DocumentPublisher:
-    """Persist one form document's fragment states."""
-
-    root: Path
-
-    def read_fragment(self, document_key: str, fragment_id: str) -> str | None:
-        """Read one fragment without knowing which producer owns it."""
-        path = self.root / document_key
-        markdown = path.read_text(encoding="utf-8") if path.exists() else ""
-        return get_fragment_markdown(markdown, fragment_id)
-
-    def publish(
-        self,
-        document_key: str,
-        results: Iterable[DocumentResult],
-    ) -> bool:
-        """Apply a form's results and report whether its document changed."""
-        results = tuple(results)
-        if len({result.fragment_id for result in results}) != len(results):
-            raise ValueError(
-                f"duplicate fragment result for document {document_key!r}"
-            )
-
-        path = self.root / document_key
-        markdown = path.read_text(encoding="utf-8") if path.exists() else ""
-        changed = False
-        for result in results:
-            updated_markdown = apply_result(markdown, result)
-            changed = changed or updated_markdown != markdown
-            markdown = updated_markdown
-
-        if not markdown.strip():
-            changed = changed or path.exists()
-            path.unlink(missing_ok=True)
-        else:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(markdown, encoding="utf-8")
-        return changed
-
-
 def document_results_for_entries(
     changes: Iterable[EntryChange],
-    document_key: str,
-    publisher: DocumentPublisher,
+    existing_markdown: str | None,
     llm: LlmClient,
 ) -> tuple[DocumentResult, ...]:
-    """Generate one form document's fragments from its affected Entries."""
+    """Generate fragments using only the caller-captured document contents."""
     return tuple(
         generate_entry_document(
             change,
             fragment_id=f"entry:{change.entry_id}",
-            existing_markdown=publisher.read_fragment(
-                document_key,
-                f"entry:{change.entry_id}",
+            existing_markdown=(
+                get_fragment_markdown(existing_markdown, f"entry:{change.entry_id}")
+                if existing_markdown is not None
+                else None
             ),
             llm=llm,
         )
@@ -466,11 +422,10 @@ def document_results_for_entries(
 
 def document_results_for_functions(
     changes: Iterable[FunctionChange],
-    document_key: str,
-    publisher: DocumentPublisher,
+    existing_markdown: str | None,
     llm: LlmClient,
 ) -> tuple[DocumentResult, ...]:
-    """Generate one fragment for each changed function in a source document."""
+    """Generate function fragments from caller-captured Markdown and code facts."""
     results = []
     for change in changes:
         fragment_id = f"function:{change.function_id}"
@@ -478,34 +433,15 @@ def document_results_for_functions(
             generate_function_document(
                 change,
                 fragment_id=fragment_id,
-                existing_markdown=publisher.read_fragment(
-                    document_key,
-                    fragment_id,
+                existing_markdown=(
+                    get_fragment_markdown(existing_markdown, fragment_id)
+                    if existing_markdown is not None
+                    else None
                 ),
                 llm=llm,
             )
         )
     return tuple(results)
-
-
-def publish_documents_for_forms(
-    changes_by_form: Mapping[str, Iterable[EntryChange]],
-    publisher: DocumentPublisher,
-    llm: LlmClient,
-) -> tuple[str, ...]:
-    """Generate and publish each affected Form's Entry documentation."""
-    updated_document_keys = []
-    for form_source_id, changes in sorted(changes_by_form.items()):
-        document_key = document_key_for_form(form_source_id)
-        results = document_results_for_entries(
-            changes,
-            document_key,
-            publisher,
-            llm,
-        )
-        if publisher.publish(document_key, results):
-            updated_document_keys.append(document_key)
-    return tuple(updated_document_keys)
 
 
 def document_key_for_form(form_source_id: str) -> str:

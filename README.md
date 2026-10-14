@@ -7,10 +7,10 @@
 FileTracker ChangeSet + complete source snapshot
   -> change_analyzer.analyze_changes()
   -> change_analyzer.entry_changes()
-  -> caller-generated DocumentResult
-  -> caller groups results by document
-  -> document_updater.apply_result()
-  -> caller-owned storage and baseline commit
+  -> language caller prepares document tasks
+  -> caller generates and combines document fragments
+  -> document_workbench stores fixed inputs and completed document units
+  -> caller publishes results
 ```
 
 ## Workspace packages
@@ -21,6 +21,7 @@ FileTracker ChangeSet + complete source snapshot
 | `file_tracker/` | 跟踪物理文件变化并维护 immutable baseline transaction。 |
 | `change_analyzer/` | 比较旧/新 CodeGraph，并将函数变更投影为具有双图路径证据的 `EntryChange`。 |
 | `document_updater/` | 以纯函数方式读取和应用受管 Markdown fragment 的 desired state。 |
+| `document_workbench/` | 固定一次运行的输入，保存目标文档单元计划、结果和完成状态，供调用方恢复。 |
 
 依赖保持单向：
 
@@ -30,11 +31,13 @@ file_tracker       code_graph
        change_analyzer
               |
       caller workflow
-              |
-      document_updater
+          /       \
+ document_updater document_workbench
 ```
 
-`document_updater` 不依赖代码分析、FileTracker、文件路径或文件系统。
+`document_updater` 保持纯 Markdown fragment 合并。`document_workbench` 只管理固定输入和恢复检查点，
+不扫描、分析、生成、合并文档或发布文件；这些工作由调用方及其他领域包负责。它不依赖 FileTracker
+或 `document_updater`。
 
 ## Minimal APIs
 
@@ -135,10 +138,11 @@ updated_markdown = apply_result(existing_markdown, result)
 ```
 
 受管内容采用 `codegraph:fragment` markers。UPSERT 在缺失时插入、存在时替换；DELETE 幂等删除。
-物理文件是否应删除由调用方决定。
+`document_updater` 返回 Markdown 字符串，不执行物理文件删除。调用方拥有 fragment 来源、
+`fragment_id -> document key` 映射、分组和审核队列；采用可恢复事务时，文件加载/发布与 FileTracker
+baseline 推进由调用方负责；`document_workbench` 保存调用方生成的完整文档单元结果和恢复进度。
 
-调用方拥有 fragment 的来源、`fragment_id -> document key` 映射、分组、Markdown 加载/发布、审核队列
-与 FileTracker baseline 推进。支持一 Entry 一 fragment、多个 Entry 合成一个 fragment，或多个
+支持一 Entry 一 fragment、多个 Entry 合成一个 fragment，或多个
 fragment 合并到一个文档。
 
 调用方可在读取目标 fragment 后构造不同 prompt：首次新增只发送当前 bounded code context，避免和
@@ -152,31 +156,22 @@ producer 生成自己的 `DocumentResult`，可与 Entry fragment 共享同一 c
 ```bash
 uv run python examples/initial_documentation.py
 uv run python examples/changed_module_documentation.py
+uv run python examples/document_workbench_mvp.py
 ```
 
-两个独立脚本各自在临时目录中演示一个调用方场景：
+脚本各自在临时目录中演示调用方场景；真实恢复调用应使用稳定的源码与文档目录：
 
-1. [`initial_documentation.py`](examples/initial_documentation.py)：创建 VBA 源码后调用 `tracker.scan()`，从全部 Entry 生成文档；所有文档发布成功后，由调用方创建 baseline。
-2. [`changed_module_documentation.py`](examples/changed_module_documentation.py)：先生成初始文档并建立 source baseline，再修改一个被 Entry 调用的 module；再次调用 `tracker.scan()` 后，`entry_changes()` 只返回受影响 Entry，发布更新后由调用方推进 baseline。
+1. [`initial_documentation.py`](examples/initial_documentation.py)：调用共享 VBA 工作流执行首次生成并确认 baseline。
+2. [`changed_module_documentation.py`](examples/changed_module_documentation.py)：使用相同工作流先生成，再更新共享 Module 并发布受影响 Entry。
 
 示例约定 VBA 导出文件同级存放，并使用 `Form_*.txt` 和 `Module_*.txt` 命名。每个 Form 的完整
 分析上下文是该 Form 加上全部 Module；`.txt` 文件由示例适配器显式标记为 VBA。Form 按
 UTF-16 读取，并只将 `CodeBehindForm` 行之后的 VBA 代码交给 CodeGraph；Module 支持 UTF-8
 或带 BOM 的 UTF-16。
 
-公共的加载、Form 范围分析、文档生成与发布对象位于
-[`documentation_example_support.py`](examples/documentation_example_support.py)。
-两个脚本都明确展示 `scan() -> affected_entries_by_form()
--> publish_documents_for_forms() -> commit()`：每个 Form 是一个文档的所有者，
-其受影响 Entry 只更新该 Form 的文档；baseline 只在所有文档成功发布后由调用方推进。
-
-[`resumable_documentation.py`](examples/resumable_documentation.py) 提供可恢复的
-`run_documentation(source_root, document_root, llm, *, generation_version="demo-v1")`。
-它先把完整最终 Markdown 和摘要记录暂存到 `document_root/.resumable/`，有效结果在重启时跳过
-分析和 LLM 并打印日志。全部生成成功后才逐文件发布，随后提交 baseline 并删除暂存目录。
-生成失败不会修改正式文档；发布失败可能留下部分更新，但重试不必重新生成有效结果。
-此接口不再接受独立的 `progress_path`，也不迁移旧 `progress.json`。布局、失效规则和恢复边界见
-[`文档生命周期`](docs/document-lifecycle.md#可恢复的暂存与发布)。
+[`document_workbench`](docs/document_recovery.md) 提供持久化输入快照和文档单元级恢复检查点。
+调用方负责扫描、分析并按目标文档组织生成结果；进程重启后，工作台跳过已完成文档单元并继续处理
+其他单元。文档发布和 baseline 管理由调用方及对应模块负责。
 
 ## Setup and validation
 
@@ -184,8 +179,7 @@ Python 3.10+ 与 uv 是必需条件。
 
 ```bash
 uv sync --all-packages
-uv run pytest code_graph/tests file_tracker/tests change_analyzer/tests document_updater/tests
-uv run pytest examples/test_resumable_documentation.py examples/test_progress_checkpoint.py examples/test_documentation_example_support.py
+PYTHONPATH=. uv run pytest code_graph/tests file_tracker/tests change_analyzer/tests document_workbench/tests tests
 uv build --all-packages
 ```
 

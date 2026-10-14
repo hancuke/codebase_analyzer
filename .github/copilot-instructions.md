@@ -2,12 +2,13 @@
 
 ## Project overview
 
-This repository is a `uv` workspace containing four packages:
+This repository is a `uv` workspace containing four domain packages and one higher-level workflow package:
 
 - `code_graph/`: language-independent static analysis and dependency queries.
 - `file_tracker/`: immutable physical file changes and baseline transactions.
 - `change_analyzer/`: old/new CodeGraph comparison and entry-impact analysis.
 - `document_updater/`: document authoring, entry-oriented plans, and Markdown fragment updates.
+- `document_workbench/`: fixed run inputs, document-unit plans, saved outputs, and recovery progress.
 
 The main flow is:
 
@@ -40,7 +41,7 @@ Dependencies are managed with `uv` and the project requires Python 3.10 or newer
 uv sync --all-packages
 
 # Run the complete test suite
-uv run pytest code_graph/tests file_tracker/tests change_analyzer/tests document_updater/tests
+PYTHONPATH=. uv run pytest code_graph/tests file_tracker/tests change_analyzer/tests document_workbench/tests tests
 
 # Run one test
 uv run pytest code_graph/tests/test_codebase.py::test_vba_analysis_resolves_cross_file_and_forward_calls
@@ -94,6 +95,9 @@ There is no configured lint command or lint tool.
 - Keep workspace responsibilities one-directional: `change_analyzer` may compose
   FileTracker and CodeGraph; `document_updater` may consume change-analysis results.
   Do not make either core package depend on these orchestration packages.
+- `document_workbench` stores fixed inputs and document-unit checkpoints. Callers own
+  file discovery, analysis, generation, and publication. Do not add dependencies on
+  `file_tracker`, `change_analyzer`, or `document_updater` to this package.
 - Entry impact is computed from the union of reverse reachability in the baseline and
   working graphs. This is required to preserve deleted dependencies and discover new ones.
 - A changed function may affect multiple entries. Keep the relationship many-to-many,
