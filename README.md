@@ -8,8 +8,9 @@ FileTracker ChangeSet + complete source snapshot
   -> change_analyzer.analyze_changes()
   -> change_analyzer.entry_changes()
   -> language caller prepares document tasks
+  -> document_workbench skips document_keys with saved results
   -> caller generates and combines document fragments
-  -> document_workbench stores fixed inputs and completed document units
+  -> document_workbench stores completed document results
   -> caller publishes results
 ```
 
@@ -21,7 +22,7 @@ FileTracker ChangeSet + complete source snapshot
 | `file_tracker/` | 跟踪物理文件变化并维护 immutable baseline transaction。 |
 | `change_analyzer/` | 比较旧/新 CodeGraph，并将函数变更投影为具有双图路径证据的 `EntryChange`。 |
 | `document_updater/` | 以纯函数方式读取和应用受管 Markdown fragment 的 desired state。 |
-| `document_workbench/` | 固定一次运行的输入，保存目标文档单元计划、结果和完成状态，供调用方恢复。 |
+| `document_workbench/` | 按 document_key 保存成功结果；调用方每次重新分析，仅跳过已成功的昂贵生成。 |
 
 依赖保持单向：
 
@@ -35,9 +36,9 @@ file_tracker       code_graph
  document_updater document_workbench
 ```
 
-`document_updater` 保持纯 Markdown fragment 合并。`document_workbench` 只管理固定输入和恢复检查点，
-不扫描、分析、生成、合并文档或发布文件；这些工作由调用方及其他领域包负责。它不依赖 FileTracker
-或 `document_updater`。
+`document_updater` 保持纯 Markdown fragment 合并。`document_workbench` 只管理成功结果检查点，
+不保存处理输入，不执行源码扫描、分析、生成或合并；显式 publish 负责结果写入和清理。
+这些业务规则由调用方及其他领域包负责。它不依赖 FileTracker 或 `document_updater`。
 
 ## Minimal APIs
 
@@ -139,8 +140,8 @@ updated_markdown = apply_result(existing_markdown, result)
 
 受管内容采用 `codegraph:fragment` markers。UPSERT 在缺失时插入、存在时替换；DELETE 幂等删除。
 `document_updater` 返回 Markdown 字符串，不执行物理文件删除。调用方拥有 fragment 来源、
-`fragment_id -> document key` 映射、分组和审核队列；采用可恢复事务时，文件加载/发布与 FileTracker
-baseline 推进由调用方负责；`document_workbench` 保存调用方生成的完整文档单元结果和恢复进度。
+`fragment_id -> document key` 映射、分组和审核队列。`document_workbench` 保存完整文档结果，
+并通过显式 publish 写入目标目录和清理检查点；FileTracker baseline 推进是调用方独立执行的步骤。
 
 支持一 Entry 一 fragment、多个 Entry 合成一个 fragment，或多个
 fragment 合并到一个文档。
@@ -169,9 +170,31 @@ uv run python examples/document_workbench_mvp.py
 UTF-16 读取，并只将 `CodeBehindForm` 行之后的 VBA 代码交给 CodeGraph；Module 支持 UTF-8
 或带 BOM 的 UTF-16。
 
-[`document_workbench`](docs/document_recovery.md) 提供持久化输入快照和文档单元级恢复检查点。
-调用方负责扫描、分析并按目标文档组织生成结果；进程重启后，工作台跳过已完成文档单元并继续处理
-其他单元。文档发布和 baseline 管理由调用方及对应模块负责。
+[`document_workbench`](docs/document_recovery.md) 用一个 JSON 保存 document_key 成功索引，
+完整结果单独保存在工作台。分析成本低，每次重新分析；只跳过已成功的昂贵文档生成：
+
+```python
+from document_workbench import Workbench
+
+with Workbench.open(workbench_root, protected_roots=(source_root,)) as workbench:
+    changes = tracker.scan()
+    for document_key, analysis in analyze_documents(changes).items():
+        if workbench.contains(document_key):
+            continue
+        content = render_document(analysis).encode("utf-8")
+        workbench.save(document_key, content)
+    workbench.publish(document_root)
+
+# baseline 提交是额外步骤，不由 publish 执行。
+```
+
+工作台不接收任务输入、Batch 或 prepare 回调。结果统一 bytes，调用方负责文本编码。
+results 返回已保存结果，不判断任务是否全量完成；调用方必须完成全部生成后再发布。
+结果保存完成不代表发布成功。显式 publish 内部复制发布，成功后关闭并清理工作台；
+发布失败保留检查点以便重试。with 退出不自动发布。tracker.commit 是调用方的额外步骤。
+同一批输入不变且仅允许单写者；输入变化时调用方清理重开。
+protected_roots 声明不可与工作台重叠的目录，路径校验由 open 内部执行。
+存储 schema 为 4，旧 schema 1/2/3 明确拒绝，不自动升级。
 
 ## Setup and validation
 

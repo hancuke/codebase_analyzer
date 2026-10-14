@@ -1,116 +1,116 @@
-# 文档更新运行：中断恢复
+# Document Workbench：成功结果与显式发布
 
-## 目标与领域边界
+工作台只保存成功结果，不保存输入、任务计划、revisions 或业务 metadata。
+存储 schema 为 4；旧 API 和 schema 1/2/3 不兼容，不自动迁移。
 
-源码分析便宜，文档生成昂贵。恢复时可以重新分析，但不应重新生成已经完整保存的文档。
+## 1. 成本边界与所有权
 
-`document_workbench.DocumentRun` 保存一次运行的固定输入、文档单元计划和完成结果。它不扫描源码，不调用分析器或 LLM，也不发布文档或推进 FileTracker baseline。这些工作由调用方完成。
+每次执行都重新扫描、分析源码，只有昂贵的文档生成按 document_key 跳过。
+一个工作台对应同一批固定工作；恢复期间输入和配置不变，变化时由调用方清理并重开。
+工作台不自动识别输入变化或证明生成内容正确。
 
-**一个恢复单元就是一份目标文档的完整更新。** 同一文档的所有 fragment 新增、修改和删除必须合并为完整结果，才能提交完成记录。单元 ID 是调用方确定的规范化相对文档路径，例如 `docs/orders.md`。共享变化可以影响多个文档，不改变分析领域的多对多关系。
+调用方拥有扫描、分析、LLM、文档合并和全量完成判断。
+工作台拥有成功结果存储、完整性校验、显式发布到 document_root 及发布后的清理。
+`tracker.commit()` 是额外的独立步骤，不属于发布，不由工作台调用。
+工作台不依赖 FileTracker、CodeGraph、change_analyzer 或 document_updater。
 
-## 固定输入目录 + manifest 最后提交
-
-```text
-run/
-├── .lock
-├── inputs/
-│   └── snapshot.json
-├── outputs/
-│   └── docs/
-│       ├── A.md
-│       └── B.md
-└── manifest.json
-```
-
-`snapshot.json` 是示例适配器的文件布局，不是 DocumentRun 的固定要求。调用方可以在 `inputs/` 保存多份文件；DocumentRun 记录它们的大小和摘要。
-
-**manifest 是提交依据，文件存在本身不表示完成。**
-
-首次运行在持有运行锁时：
-
-1. 调用 `capture_inputs(inputs_root)`，直接把完整输入写入 `inputs/`。
-2. 校验输入，记录文件清单和摘要，并持久化文件与目录。
-3. 最后原子写入 `manifest.json`，输入快照才正式生效。
-
-不需要额外的输入 staging 目录。若进程在步骤 3 前退出，下次初始化发现没有 manifest，会删除专用的未提交 `inputs/` 和 `.manifest-*.tmp` 文件，然后重新捕获。只清理这些保留路径；未知文件、非法目录或符号链接会明确报错。
-
-已有 manifest 时，只打开并校验已提交运行，不重新采集，也不清理输入。损坏或不兼容的 manifest、输入或已完成结果会明确失败，不能通过重新扫描实时文件来补齐。
-
-## 文档生成与恢复
-
-```text
-固定输入提交
-  -> 调用方分析固定输入并按目标文档分组
-  -> 提交排序后的文档单元 ID 计划
-  -> 生成一个待处理文档的完整结果
-  -> 保存并持久化输出
-  -> 原子提交该文档的完成记录
-```
-
-计划尚未注册与空计划不同；空计划表示本次没有文档需要生成。恢复时重新推导的单元 ID 必须与原计划相同，否则报错。
-
-待处理文档由以下规则确定：
-
-```text
-待处理文档 = 已注册计划 − 已完成记录
-```
-
-例如计划包含 A、B，A 已完成，生成 B 时中断。恢复后复用固定输入，重新执行便宜的分析，校验 A 的已保存结果并跳过生成，只重新生成 B。B 的半成品输出会在重试前删除。
-
-若输出已保存，但完成记录尚未提交，该文档仍然待处理。允许重新生成，不承诺 LLM 调用 exactly-once，也不恢复到某个 prompt 或 fragment 内部。`COMPLETED` 只表示所有计划内文档结果已保存，不表示正式文档已发布。
-
-## 公共接口
-
-| 接口 | 语义 |
-| --- | --- |
-| `DocumentRun.open_or_create(root, capture_inputs=...)` | 持锁打开已有运行，或捕获输入并初始化；恢复时不执行回调 |
-| `DocumentRun.open(root)` | 只打开已有有效运行 |
-| `snapshot_root` | 读取已提交的固定输入；提交后调用方不得修改 |
-| `register_units(unit_ids)` | 注册计划；相同计划可重复注册，不同计划报错 |
-| `pending_units()` | 校验输入和完成输出，返回排序后的待处理 ID |
-| `status()` | 查询阶段、计划和完成记录 |
-| `prepare_unit_output(unit_id)` | 为待处理文档准备路径，删除该文档上次未提交的输出 |
-| `mark_unit_completed(unit_id)` | 校验并持久化完整输出，再原子提交完成记录 |
-| `output_path(unit_id)` | 返回校验通过的已完成文档输出 |
-
-manifest 更新使用临时文件写入、文件同步、原子替换和目录同步。运行锁拒绝同一目录的并发处理；不存在额外的任务调度器、分析缓存或存储后端抽象。
-
-Windows 提交输入或输出时，需要以非截断读写模式打开文件才能同步到磁盘，因此这些文件必须可写；普通摘要校验仍只读。目录同步仅在平台提供 `O_DIRECTORY` 时执行，Windows 不提供同等的目录持久化保证。文件同步失败会传播，不会将未同步结果标记为完成。
-
-## 调用方示意
-
-下面的 capture/load/analyze/generate 函数由调用方实现；完整可运行示例见 `examples/document_workbench_mvp.py`。该示例在主流程中初始化固定输入，处理函数只打开已有运行；恢复处理无需再次传入采集回调。
+## 2. 接口
 
 ```python
-from document_workbench import DocumentRun
-
-with DocumentRun.open_or_create(
-    run_root,
-    capture_inputs=capture_inputs,
-) as run:
-    pass
-
-with DocumentRun.open(run_root) as run:
-    snapshot = load_snapshot(run.snapshot_root)
-    # 每次从固定输入重算，分析结果按目标文档确定性分组。
-    changes_by_document = analyze_and_group(snapshot)
-    run.register_units(changes_by_document)
-
-    for document_id in run.pending_units():
-        markdown = generate_complete_document(
-            snapshot,
-            document_id,
-            changes_by_document[document_id],
-        )
-        output = run.prepare_unit_output(document_id)
-        output.write_text(markdown, encoding="utf-8")
-        run.mark_unit_completed(document_id)
+class Workbench:
+    @classmethod
+    def open(
+        cls, root: str | os.PathLike[str], *,
+        protected_roots: Iterable[str | os.PathLike[str]] = (),
+    ) -> Workbench: ...
+    def contains(self, document_key: str) -> bool: ...
+    def save(self, document_key: str, content: bytes) -> None: ...
+    def results(self) -> Mapping[str, bytes]: ...
+    def publish(self, document_root: str | os.PathLike[str]) -> None: ...
+    def close(self) -> None: ...
 ```
 
-FileTracker 的固定 ChangeSet、完整源码、旧文档以及影响生成的必要配置由适配器负责捕获和编解码。分析和生成只能使用本次固定输入，不应恢复时回读已变化的实时源码或旧文档。DocumentRun 不接收 `ChangeSet`、`SourceFile` 或 `DocumentResult` 等其他包的领域对象。
+仅导出 Workbench 和 WorkbenchError，无 Batch、prepare、metadata 或状态对象。
 
-## 发布与 baseline
+- open 创建或恢复索引，校验成功结果并持有操作系统文件锁；并发打开立即报错。
+  调用方可通过 protected_roots 声明受保护目录；内部解析实际路径，在创建或修改工作台前
+  拒绝相同目录及双向包含关系。此参数不持久化，恢复时应再次传入。
+- contains 查询并校验对应的成功结果，无记录返回 False，损坏则报错。
+- save 保存完整 bytes 再提交成功索引，不要求注册任务，不允许覆盖成功 key。
+- results 返回按 key 排序的只读成功结果 mapping，不判断是否全部任务完成。
+- publish 显式复制所有成功结果到 document_root，全部发布成功后关闭并清理工作台。
+- close / with 退出只释放锁。正常退出也不自动发布，不自动清理。
 
-完成结果先保存在运行目录，审核和发布仍由调用方负责。发布可能在中断后重复执行，调用方应保证重复写入同一结果是安全的，并处理正式文档的并发修改。
+空 bytes、非 UTF-8 bytes 合法，文本编码由调用方负责。调用方必须在全部处理成功后调用
+publish；处理异常直接传播，不能吞掉异常后发布部分结果。
 
-只有所有文档发布成功且原始 ChangeSet revisions 仍匹配，才能推进 FileTracker baseline。DocumentRun 的完成记录不替代发布状态，也不自动提供跨文档发布事务。
+## 3. 存储与可靠提交
+
+```text
+workbench/
+  .lock
+  state.json
+  outputs/docs/orders.md
+```
+
+```json
+{
+  "schema_version": 4,
+  "completed": {
+    "docs/orders.md": {"size_bytes": 123, "sha256": "..."}
+  }
+}
+```
+
+只有一个正式状态 JSON，保存成功索引；完整结果单独保存。
+key 为规范化相对 POSIX 路径，拒绝路径穿越、大小写及文件/目录碰撞。
+状态和内部输出路径不能是符号链接，JSON 重复 key 明确失败。
+
+save 先写结果并同步文件和目录，再通过临时 JSON、同步、原子替换及目录同步提交。
+输出存在但索引尚未提交不算成功，下次允许重新生成和覆盖未提交输出。
+JSON 替换后同步失败会使提交结果不确定，当前句柄禁止继续操作，需关闭重开。
+不承诺生成 exactly-once；生成完成但保存失败时可能再次生成。
+
+打开、查询和交付时完整性校验对调用方透明，损坏不默默变成空索引。
+锁文件存在不表示被占用；Windows/Unix 使用操作系统锁。
+没有 O_DIRECTORY 的平台不保证相同的目录同步持久性。
+
+## 4. 发布与清理
+
+publish 内部先校验所有结果，再逐文件写目标目录的临时文件、同步并原子替换。
+不逐文件 move；发布过程中所有源结果保留在工作台，发布中断可重复执行，
+无需重新生成已成功文档。目标目录不能在工作台内，不跟随目标内部符号链接。
+
+全部目标文件写入成功后，关闭句柄并删除本批已知的结果、目录和状态。
+不递归删除未知数据；未知残留使清理明确失败。
+publish 成功后实例已关闭，with 随后的退出为幂等关闭。
+清理失败可能留下残缺检查点，必须明确恢复或完成清理，不能假装发布未发生。
+
+单文件原子替换不等于多文件同时可见。发布不与 baseline 提交构成事务：
+如果调用方后来执行 tracker.commit 失败，文档已经发布、工作台也可能已经清理。
+调用方必须独立管理该业务错误，工作台不保存 baseline 状态。
+调用方需独占本批及目标目录，包括关闭锁后的清理阶段。
+
+## 5. 示例主流程
+
+```python
+with Workbench.open(workbench_root, protected_roots=(source_root,)) as workbench:
+    changes = tracker.scan()
+    for key, function_changes in analyze_documents(source_root, changes).items():
+        if workbench.contains(key):
+            continue
+        content = generate_document(function_changes, read_document(document_root / key))
+        workbench.save(key, content)
+    workbench.publish(document_root)
+
+# 如业务需要，调用方另行执行 tracker.commit(...)，不属于以上流程。
+```
+
+示例支持模块只负责分析分组和读取原文，目录保护内化到 open，不再提供 publish_batch、
+revision 比较或 baseline 提交。示例临时项目仅用于演示，实际恢复需持久目录。
+
+## 6. 验收
+
+生成失败重跑再次分析并跳过成功 key；跨进程恢复；二进制结果往返；
+提交故障窗口与损坏报错；路径和并发保护；正常退出不自动发布；
+显式发布成功后清理；发布失败保留检查点和旧目标文件；发布不调用 tracker.commit。

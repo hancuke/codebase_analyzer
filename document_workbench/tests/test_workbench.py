@@ -1,331 +1,442 @@
 from __future__ import annotations
 
-import hashlib
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
-import document_workbench.workbench as run_storage
-
-from document_workbench import (
-    DocumentRun,
-    InvalidUnitIdError,
-    UnsupportedWorkbenchVersionError,
-    WorkbenchBusyError,
-    WorkbenchCorruptError,
-    WorkbenchPhase,
-    WorkbenchStateError,
-)
+import document_workbench.workbench as storage
+from document_workbench import Workbench, WorkbenchError
 
 
-def _capture_inputs(root: Path) -> None:
-    (root / "sources").mkdir()
-    (root / "sources" / "module.txt").write_text("fixed source", encoding="utf-8")
-
-
-@pytest.mark.parametrize("sync", [False, True])
-def test_windows_digest_uses_writable_handle_only_when_syncing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sync: bool
-) -> None:
-    path = tmp_path / "document.md"
-    content = b"complete document"
-    path.write_bytes(content)
-    original_open = Path.open
-    modes: list[str] = []
-
-    def open_file(self: Path, mode: str = "r", **kwargs):
-        modes.append(mode)
-        return original_open(self, mode, **kwargs)
-
-    with monkeypatch.context() as patch:
-        patch.setattr(run_storage.os, "name", "nt")
-        patch.setattr(Path, "open", open_file)
-        result = DocumentRun._digest_file(path, sync=sync)
-
-    assert modes == ["r+b" if sync else "rb"]
-    assert result == (len(content), hashlib.sha256(content).hexdigest())
-    assert path.read_bytes() == content
-
-
-def test_open_create_process_and_resume_skips_completed_units(tmp_path: Path) -> None:
+def test_failure_and_reopen_skip_success_with_rebuilt_tasks(tmp_path: Path) -> None:
     root = tmp_path / "run"
-    capture_calls = 0
+    processed = []
+    with pytest.raises(RuntimeError, match="processing failed"):
+        with Workbench.open(root) as workbench:
+            for key in ("docs/A.md", "docs/B.md"):
+                processed.append(key)
+                if key == "docs/B.md":
+                    raise RuntimeError("processing failed")
+                workbench.save(key, b"# A")
+            pytest.fail("must stop")
+    with Workbench.open(root) as workbench:
+        assert workbench.contains("docs/A.md")
+        assert not workbench.contains("docs/B.md")
+        assert workbench.results() == {"docs/A.md": b"# A"}
+        workbench.save("docs/B.md", b"# B")
+        assert workbench.results() == {"docs/A.md": b"# A", "docs/B.md": b"# B"}
+        with pytest.raises(TypeError):
+            workbench.results()["docs/A.md"] = b"changed"
+    assert processed == ["docs/A.md", "docs/B.md"]
+    state = json.loads((root / "state.json").read_bytes())
+    assert set(state) == {"schema_version", "completed"}
+    assert list(root.glob("*.json")) == [root / "state.json"]
+    with Workbench.open(root) as workbench:
+        assert tuple(workbench.results()) == ("docs/A.md", "docs/B.md")
 
-    def capture(inputs: Path) -> None:
-        nonlocal capture_calls
-        capture_calls += 1
-        _capture_inputs(inputs)
 
-    with DocumentRun.open_or_create(root, capture_inputs=capture) as workbench:
-        assert workbench.snapshot_root.joinpath("sources/module.txt").read_text() == "fixed source"
-        assert workbench.status().phase is WorkbenchPhase.SNAPSHOT_READY
-        with pytest.raises(WorkbenchStateError, match="register the unit plan"):
-            workbench.pending_units()
-
-        workbench.register_units(("docs/B.md", "docs/A.md"))
-        assert workbench.pending_units() == ("docs/A.md", "docs/B.md")
-        output = workbench.prepare_unit_output("docs/A.md")
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text("# A", encoding="utf-8")
-        completion = workbench.mark_unit_completed("docs/A.md")
-
-        assert completion.size_bytes == 3
-        assert completion.sha256 == hashlib.sha256(b"# A").hexdigest()
-        assert workbench.pending_units() == ("docs/B.md",)
-        assert workbench.output_path("docs/A.md").read_text() == "# A"
-
-    def unexpected_capture(_: Path) -> None:
-        pytest.fail("capture callback must not run when resuming")
-
-    with DocumentRun.open_or_create(root, capture_inputs=unexpected_capture) as resumed:
-        assert capture_calls == 1
-        assert resumed.pending_units() == ("docs/B.md",)
-        output = resumed.prepare_unit_output("docs/B.md")
-        output.write_text("# B", encoding="utf-8")
-        resumed.mark_unit_completed("docs/B.md")
-        status = resumed.status()
-
-    assert status.phase is WorkbenchPhase.COMPLETED
-    assert status.is_complete
-    assert status.pending_unit_ids == ()
-    assert tuple(item.unit_id for item in status.completions) == (
-        "docs/A.md",
-        "docs/B.md",
+def test_another_process_resumes_committed_documents(tmp_path: Path) -> None:
+    root = tmp_path / "run"
+    first = subprocess.run(
+        [
+            sys.executable, "-c",
+            "import sys\n"
+            "from document_workbench import Workbench\n"
+            "with Workbench.open(sys.argv[1]) as w:\n"
+            "    w.save('a', b'A')\n"
+            "    raise RuntimeError('interrupted')\n",
+            str(root),
+        ],
+        capture_output=True, text=True, check=False,
     )
+    assert first.returncode != 0
+    assert "RuntimeError: interrupted" in first.stderr
+    second = subprocess.run(
+        [
+            sys.executable, "-c",
+            "import sys\n"
+            "from document_workbench import Workbench\n"
+            "with Workbench.open(sys.argv[1]) as w:\n"
+            "    assert w.contains('a') and not w.contains('b')\n"
+            "    w.save('b', b'B')\n"
+            "    assert w.results() == {'a': b'A', 'b': b'B'}\n",
+            str(root),
+        ],
+        capture_output=True, text=True, check=False,
+    )
+    assert second.returncode == 0, second.stderr
 
-    with DocumentRun.open(root) as completed:
-        assert completed.status().is_complete
-        assert completed.pending_units() == ()
+
+@pytest.mark.parametrize("content", [b"", b"\x00\xff\r\n", "\u4fdd\u7559\r\n".encode()])
+def test_exact_result_round_trip(tmp_path: Path, content: bytes) -> None:
+    root = tmp_path / "run"
+    with Workbench.open(root) as workbench:
+        workbench.save("a", content)
+        assert workbench.contains("a")
+    with Workbench.open(root) as workbench:
+        assert workbench.results() == {"a": content}
 
 
-def test_register_empty_plan_is_complete_but_unregistered_is_not(tmp_path: Path) -> None:
-    with DocumentRun.open_or_create(
-        tmp_path / "run", capture_inputs=_capture_inputs
-    ) as workbench:
-        status = workbench.status()
-        assert status.phase is WorkbenchPhase.SNAPSHOT_READY
-        assert not status.is_complete
-        workbench.register_units(())
-        assert workbench.status().phase is WorkbenchPhase.COMPLETED
-        assert workbench.status().is_complete
-        assert workbench.pending_units() == ()
-
-
-def test_register_same_plan_is_idempotent_and_changed_plan_fails(
-    tmp_path: Path,
-) -> None:
-    with DocumentRun.open_or_create(
-        tmp_path / "run", capture_inputs=_capture_inputs
-    ) as workbench:
-        workbench.register_units(("docs/A.md", "docs/B.md"))
-        workbench.register_units(("docs/B.md", "docs/A.md"))
-        with pytest.raises(WorkbenchStateError, match="do not match"):
-            workbench.register_units(("docs/A.md",))
+def test_empty_store_and_invalid_save_have_no_side_effects(tmp_path: Path) -> None:
+    with Workbench.open(tmp_path / "run") as workbench:
+        assert workbench.results() == {}
+        with pytest.raises(TypeError):
+            workbench.save("docs/A.md", "text")
+        assert not (tmp_path / "run" / "outputs").exists()
+        workbench.save("docs/A.md", b"A")
+        with pytest.raises(WorkbenchError, match="already completed"):
+            workbench.save("docs/A.md", b"replacement")
 
 
 @pytest.mark.parametrize(
-    "unit_ids",
-    [
-        ("../escape.md",),
-        ("/absolute.md",),
-        ("C:/absolute.md",),
-        (r"docs\escape.md",),
-        ("docs//empty.md",),
-        ("docs/./dot.md",),
-        ("docs/a.md", "docs/a.md/child"),
-        ("docs/a.md", "DOCS/A.MD"),
-        ("docs/a.md", "docs/a.md"),
-    ],
+    "key", ["", "../escape", "/absolute", "C:/absolute", r"docs\escape",
+            "docs//empty", "docs/./dot", "docs/\x00", 1]
 )
-def test_rejects_invalid_or_colliding_unit_ids(
-    tmp_path: Path, unit_ids: tuple[str, ...]
+def test_invalid_keys_do_not_write_results(tmp_path: Path, key: str) -> None:
+    with Workbench.open(tmp_path / "run") as workbench:
+        with pytest.raises((ValueError, TypeError)):
+            workbench.save(key, b"result")
+        with pytest.raises((ValueError, TypeError)):
+            workbench.contains(key)
+        assert not (tmp_path / "run/outputs").exists()
+
+
+@pytest.mark.parametrize(
+    "key", ["DOCS/a.md", "docs/A.MD", "docs/a.md/child", "docs", "DOCS/b.md"]
+)
+def test_colliding_paths_are_rejected_before_writing(tmp_path: Path, key: str) -> None:
+    with Workbench.open(tmp_path / "run") as workbench:
+        workbench.save("docs/a.md", b"A")
+        with pytest.raises(ValueError):
+            workbench.save(key, b"B")
+        assert workbench.results() == {"docs/a.md": b"A"}
+
+
+@pytest.mark.parametrize("stage", ["output", "sync", "state", "replace", "directory"])
+def test_commit_failure_reopens_at_the_persisted_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str
 ) -> None:
-    with DocumentRun.open_or_create(
-        tmp_path / "run", capture_inputs=_capture_inputs
-    ) as workbench:
-        with pytest.raises(InvalidUnitIdError):
-            workbench.register_units(unit_ids)
-
-
-def test_interrupted_unit_output_is_replaced_on_retry(tmp_path: Path) -> None:
     root = tmp_path / "run"
-    with DocumentRun.open_or_create(root, capture_inputs=_capture_inputs) as workbench:
-        workbench.register_units(("docs/A.md",))
-        failed_attempt = workbench.prepare_unit_output("docs/A.md")
-        failed_attempt.write_text("partial output", encoding="utf-8")
+    original_open = Path.open
+    original_sync = Workbench._fsync_directory
 
-    with DocumentRun.open(root) as resumed:
-        assert resumed.pending_units() == ("docs/A.md",)
-        retry = resumed.prepare_unit_output("docs/A.md")
-        assert not retry.exists()
-        retry.write_text("complete output", encoding="utf-8")
-        resumed.mark_unit_completed("docs/A.md")
+    def fail_output(path: Path, mode="r", *args, **kwargs):
+        if mode == "wb":
+            with original_open(path, "wb") as stream:
+                stream.write(b"partial")
+            raise OSError("output failed")
+        return original_open(path, mode, *args, **kwargs)
 
+    def fail_sync(descriptor: int) -> None:
+        raise OSError("sync failed")
 
-def test_unit_must_be_pending_and_have_output_before_completion(
-    tmp_path: Path,
-) -> None:
-    with DocumentRun.open_or_create(
-        tmp_path / "run", capture_inputs=_capture_inputs
-    ) as workbench:
-        workbench.register_units(("docs/A.md",))
-        with pytest.raises(WorkbenchStateError, match="does not exist"):
-            workbench.mark_unit_completed("docs/A.md")
-        with pytest.raises(WorkbenchStateError, match="unknown unit"):
-            workbench.prepare_unit_output("docs/unknown.md")
+    def fail_replace(source, target) -> None:
+        raise OSError("replace failed")
 
-        output = workbench.prepare_unit_output("docs/A.md")
-        output.write_text("# A", encoding="utf-8")
-        workbench.mark_unit_completed("docs/A.md")
-        with pytest.raises(WorkbenchStateError, match="already completed"):
-            workbench.prepare_unit_output("docs/A.md")
+    def fail_state(value, stream, **kwargs) -> None:
+        stream.write("partial")
+        raise OSError("state failed")
 
+    def fail_directory(path: Path) -> None:
+        if path == root:
+            raise OSError("directory failed")
+        original_sync(path)
 
-def test_completed_output_tampering_is_detected(tmp_path: Path) -> None:
-    root = tmp_path / "run"
-    with DocumentRun.open_or_create(root, capture_inputs=_capture_inputs) as workbench:
-        workbench.register_units(("docs/A.md",))
-        output = workbench.prepare_unit_output("docs/A.md")
-        output.write_text("# A", encoding="utf-8")
-        workbench.mark_unit_completed("docs/A.md")
-        output.write_text("# changed", encoding="utf-8")
-        with pytest.raises(WorkbenchCorruptError, match="integrity"):
-            workbench.output_path("docs/A.md")
-
-
-def test_pending_query_rejects_tampered_completed_output(tmp_path: Path) -> None:
-    with DocumentRun.open_or_create(
-        tmp_path / "run", capture_inputs=_capture_inputs
-    ) as workbench:
-        workbench.register_units(("docs/A.md", "docs/B.md"))
-        output = workbench.prepare_unit_output("docs/A.md")
-        output.write_text("# A", encoding="utf-8")
-        workbench.mark_unit_completed("docs/A.md")
-        output.write_text("# tampered", encoding="utf-8")
-
-        with pytest.raises(WorkbenchCorruptError, match="integrity"):
-            workbench.pending_units()
+    with Workbench.open(root) as workbench:
+        workbench.save("docs/A.md", b"A")
+        with monkeypatch.context() as patch:
+            if stage == "output":
+                patch.setattr(Path, "open", fail_output)
+            elif stage == "sync":
+                patch.setattr(storage.os, "fsync", fail_sync)
+            elif stage == "replace":
+                patch.setattr(storage.os, "replace", fail_replace)
+            elif stage == "state":
+                patch.setattr(storage.json, "dump", fail_state)
+            else:
+                patch.setattr(Workbench, "_fsync_directory", staticmethod(fail_directory))
+            with pytest.raises(OSError, match=f"{stage} failed"):
+                workbench.save("docs/B.md", b"B")
+        if stage in {"state", "replace", "directory"}:
+            with pytest.raises(WorkbenchError, match="reopen"):
+                workbench.contains("docs/A.md")
+    with Workbench.open(root) as workbench:
+        if stage != "directory":
+            assert not workbench.contains("docs/B.md")
+            workbench.save("docs/B.md", b"retried B")
+        assert workbench.results()["docs/A.md"] == b"A"
 
 
-def test_snapshot_tampering_is_detected_after_reopen(tmp_path: Path) -> None:
-    root = tmp_path / "run"
-    with DocumentRun.open_or_create(root, capture_inputs=_capture_inputs) as workbench:
-        workbench.register_units(())
-        (workbench.snapshot_root / "sources/module.txt").write_text(
-            "changed", encoding="utf-8"
-        )
-
-    with pytest.raises(WorkbenchCorruptError, match="snapshot"):
-        DocumentRun.open(root)
-
-
-def test_capture_failure_can_be_retried(tmp_path: Path) -> None:
-    root = tmp_path / "run"
-
-    def fail_after_writing(inputs: Path) -> None:
-        assert inputs == root / "inputs"
-        (inputs / "partial.txt").write_text("partial", encoding="utf-8")
-        raise RuntimeError("capture failed")
-
-    with pytest.raises(RuntimeError, match="capture failed"):
-        DocumentRun.open_or_create(root, capture_inputs=fail_after_writing)
-
-    with DocumentRun.open_or_create(root, capture_inputs=_capture_inputs) as run:
-        assert (
-            run.snapshot_root.joinpath("sources/module.txt").read_text()
-            == "fixed source"
-        )
-
-
-def test_uncommitted_snapshot_is_replaced_on_retry(tmp_path: Path) -> None:
-    root = tmp_path / "run"
-    partial_snapshot = root / "inputs"
-    partial_snapshot.mkdir(parents=True)
-    (partial_snapshot / "partial.txt").write_text("partial", encoding="utf-8")
-    temporary_manifest = root / ".manifest-interrupted.tmp"
-    temporary_manifest.write_text('{"schema_version":', encoding="utf-8")
-
-    with DocumentRun.open_or_create(root, capture_inputs=_capture_inputs) as run:
-        assert sorted(path.name for path in run.snapshot_root.iterdir()) == ["sources"]
-        assert not temporary_manifest.exists()
-
-
-def test_manifest_commit_failure_can_be_retried(
+def test_initial_state_failure_and_known_temporary_are_retryable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = tmp_path / "run"
 
-    def fail_replace(source: Path, destination: Path) -> None:
-        raise OSError("manifest commit failed")
+    def fail_replace(source, target) -> None:
+        raise OSError("initial commit failed")
 
     with monkeypatch.context() as patch:
-        patch.setattr(run_storage.os, "replace", fail_replace)
-        with pytest.raises(OSError, match="manifest commit failed"):
-            DocumentRun.open_or_create(root, capture_inputs=_capture_inputs)
-
-    assert not (root / "manifest.json").exists()
-    (root / "inputs/sources/module.txt").write_text("uncommitted", encoding="utf-8")
-    with DocumentRun.open_or_create(root, capture_inputs=_capture_inputs) as run:
-        assert (
-            run.snapshot_root.joinpath("sources/module.txt").read_text()
-            == "fixed source"
-        )
+        patch.setattr(storage.os, "replace", fail_replace)
+        with pytest.raises(OSError):
+            Workbench.open(root)
+    assert not (root / "state.json").exists()
+    temporary = root / ".state-interrupted.tmp"
+    temporary.write_bytes(b"partial")
+    with Workbench.open(root):
+        assert not temporary.exists()
 
 
-@pytest.mark.parametrize("reserved_path", ["inputs", ".manifest-interrupted.tmp"])
-def test_uncommitted_paths_cannot_be_symlinks(
-    tmp_path: Path, reserved_path: str
-) -> None:
+@pytest.mark.parametrize("damage", ["missing", "changed", "symlink"])
+def test_successful_result_damage_is_not_skipped(tmp_path: Path, damage: str) -> None:
+    root = tmp_path / "run"
+    with Workbench.open(root) as workbench:
+        workbench.save("docs/A.md", b"A")
+        output = root / "outputs/docs/A.md"
+        output.unlink()
+        if damage == "changed":
+            output.write_bytes(b"changed")
+        elif damage == "symlink":
+            outside = tmp_path / "outside"
+            outside.write_bytes(b"A")
+            output.symlink_to(outside)
+        with pytest.raises(WorkbenchError):
+            workbench.contains("docs/A.md")
+    with pytest.raises(WorkbenchError):
+        Workbench.open(root)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        b"not json", b"\xff",
+        b'{"schema_version":4,"schema_version":4}',
+        b'{"schema_version":4,"completed":{"a":{},"a":{}}}',
+        b'{"schema_version":4,"completed":{"a":{"size_bytes":NaN,"sha256":"invalid"}}}',
+    ],
+)
+def test_invalid_json_is_not_reset_and_lock_is_released(tmp_path: Path, value: bytes) -> None:
+    root = tmp_path / "run"
+    root.mkdir()
+    (root / "state.json").write_bytes(value)
+    for _ in range(2):
+        with pytest.raises(WorkbenchError, match="invalid"):
+            Workbench.open(root)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("schema_version", True), ("schema_version", 3),
+        ("completed", {"../escape": {"size_bytes": 0, "sha256": "0" * 64}}),
+        ("completed", None), ("documents", {}),
+        ("completed", {"docs/A.md": {"size_bytes": True, "sha256": "0" * 64}}),
+        ("completed", {"docs/A.md": {"size_bytes": 0, "sha256": "invalid"}}),
+    ],
+)
+def test_invalid_persisted_structure_is_rejected(tmp_path: Path, field: str, value: object) -> None:
+    root = tmp_path / "run"
+    with Workbench.open(root):
+        pass
+    path = root / "state.json"
+    state = json.loads(path.read_bytes())
+    state[field] = value
+    path.write_text(json.dumps(state))
+    with pytest.raises(WorkbenchError):
+        Workbench.open(root)
+
+
+@pytest.mark.parametrize("name", ["unknown.txt", "outputs", "manifest.json"])
+def test_uncommitted_unknown_or_legacy_data_is_not_removed(tmp_path: Path, name: str) -> None:
+    root = tmp_path / "run"
+    root.mkdir()
+    marker = root / name
+    marker.write_bytes(b"keep")
+    with pytest.raises(WorkbenchError):
+        Workbench.open(root)
+    assert marker.read_bytes() == b"keep"
+
+
+@pytest.mark.parametrize("name", [".lock", "state.json", ".state-partial.tmp", "outputs"])
+def test_symlinks_are_not_followed(tmp_path: Path, name: str) -> None:
+    root = tmp_path / "run"
+    root.mkdir()
     outside = tmp_path / "outside"
-    outside.mkdir()
-    marker = outside / "keep.txt"
-    marker.write_text("keep", encoding="utf-8")
+    outside.write_bytes(b"keep")
+    (root / name).symlink_to(outside)
+    with pytest.raises(WorkbenchError):
+        with Workbench.open(root) as workbench:
+            workbench.save("docs/A.md", b"A")
+    assert outside.read_bytes() == b"keep"
+
+
+def test_lock_and_closed_lifecycle(tmp_path: Path) -> None:
     root = tmp_path / "run"
-    root.mkdir()
-    (root / reserved_path).symlink_to(outside, target_is_directory=True)
-
-    with pytest.raises(WorkbenchCorruptError, match="must be a real directory|regular file"):
-        DocumentRun.open_or_create(root, capture_inputs=_capture_inputs)
-    assert marker.read_text(encoding="utf-8") == "keep"
-
-
-def test_unexpected_run_data_without_manifest_is_not_reused(tmp_path: Path) -> None:
-    root = tmp_path / "run"
-    root.mkdir()
-    (root / "unexpected.txt").write_text("unknown", encoding="utf-8")
-
-    with pytest.raises(WorkbenchCorruptError, match="no manifest"):
-        DocumentRun.open_or_create(root, capture_inputs=_capture_inputs)
-
-
-def test_workbench_lock_rejects_concurrent_writer(tmp_path: Path) -> None:
-    root = tmp_path / "run"
-    with DocumentRun.open_or_create(root, capture_inputs=_capture_inputs):
-        with pytest.raises(WorkbenchBusyError):
-            DocumentRun.open(root)
-
-
-def test_unsupported_schema_is_not_reset(tmp_path: Path) -> None:
-    root = tmp_path / "run"
-    with DocumentRun.open_or_create(root, capture_inputs=_capture_inputs):
+    with Workbench.open(root) as workbench:
+        with pytest.raises(WorkbenchError, match="already open"):
+            Workbench.open(root)
+    workbench.close()
+    for operation in (lambda: workbench.contains("docs/A.md"), workbench.results,
+                      lambda: workbench.save("docs/A.md", b"A")):
+        with pytest.raises(WorkbenchError, match="closed"):
+            operation()
+    with Workbench.open(root):
         pass
 
-    manifest_path = root / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["schema_version"] = 999
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
-    with pytest.raises(UnsupportedWorkbenchVersionError):
-        DocumentRun.open_or_create(root, capture_inputs=_capture_inputs)
+def test_unknown_data_in_committed_root_is_preserved(tmp_path: Path) -> None:
+    root = tmp_path / "run"
+    with Workbench.open(root):
+        pass
+    marker = root / "unknown.txt"
+    marker.write_bytes(b"keep")
+    with pytest.raises(WorkbenchError, match="unexpected"):
+        Workbench.open(root)
+    assert marker.read_bytes() == b"keep"
 
 
-def test_symlinks_in_input_snapshot_are_rejected(tmp_path: Path) -> None:
-    outside = tmp_path / "outside.txt"
-    outside.write_text("external", encoding="utf-8")
+def test_nested_output_symlink_is_not_followed(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    with Workbench.open(tmp_path / "run") as workbench:
+        outputs = tmp_path / "run/outputs"
+        outputs.mkdir()
+        (outputs / "docs").symlink_to(outside, target_is_directory=True)
+        with pytest.raises(WorkbenchError, match="real directory"):
+            workbench.save("docs/A.md", b"A")
+    assert not list(outside.iterdir())
 
-    def capture(inputs: Path) -> None:
-        (inputs / "link.txt").symlink_to(outside)
 
-    with pytest.raises(WorkbenchCorruptError, match="non-regular"):
-        DocumentRun.open_or_create(tmp_path / "run", capture_inputs=capture)
+def test_publish_copies_results_cleans_store_and_closes_handle(tmp_path: Path) -> None:
+    root = tmp_path / "workbench"
+    target = tmp_path / "published"
+    with Workbench.open(root) as workbench:
+        workbench.save("docs/a.md", b"\xff")
+        workbench.save("docs/b.md", b"")
+        workbench.publish(target)
+        with pytest.raises(WorkbenchError, match="closed"):
+            workbench.contains("docs/a.md")
+    assert not root.exists()
+    assert (target / "docs/a.md").read_bytes() == b"\xff"
+    assert (target / "docs/b.md").read_bytes() == b""
+
+
+def test_normal_exit_does_not_publish_or_clean(tmp_path: Path) -> None:
+    root = tmp_path / "workbench"
+    with Workbench.open(root) as workbench:
+        workbench.save("a", b"A")
+    assert root.exists()
+    with Workbench.open(root) as workbench:
+        assert workbench.contains("a")
+
+
+def test_publish_failure_preserves_results_and_original_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "workbench"
+    target = tmp_path / "published"
+    target.mkdir()
+    (target / "a").write_bytes(b"original")
+    with Workbench.open(root) as workbench:
+        workbench.save("a", b"new")
+        with monkeypatch.context() as patch:
+            def fail_replace(source, destination):
+                raise OSError("publish failed")
+            patch.setattr(storage.os, "replace", fail_replace)
+            with pytest.raises(OSError, match="publish failed"):
+                workbench.publish(target)
+        assert workbench.contains("a")
+        assert (target / "a").read_bytes() == b"original"
+        assert not list(target.glob(".publish-*"))
+        workbench.publish(target)
+    assert not root.exists()
+    assert (target / "a").read_bytes() == b"new"
+
+
+def test_publish_rejects_destination_inside_store_and_symlink(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "workbench"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    target = tmp_path / "published"
+    target.mkdir()
+    (target / "docs").symlink_to(outside, target_is_directory=True)
+    with Workbench.open(root) as workbench:
+        workbench.save("docs/a", b"A")
+        for destination in (root, root / "nested"):
+            with pytest.raises(ValueError):
+                workbench.publish(destination)
+        with pytest.raises(WorkbenchError, match="real directory"):
+            workbench.publish(target)
+        assert workbench.contains("docs/a")
+    assert not list(outside.iterdir())
+
+
+def test_publish_cannot_overwrite_its_state_through_parent_destination(tmp_path: Path) -> None:
+    root = tmp_path / "workbench"
+    with Workbench.open(root) as workbench:
+        workbench.save("workbench/state.json", b"replacement")
+        with pytest.raises(ValueError, match="overwrite"):
+            workbench.publish(tmp_path)
+        assert workbench.contains("workbench/state.json")
+
+
+def test_cleanup_failure_is_explicit_and_does_not_remove_unknown_data(tmp_path: Path) -> None:
+    root = tmp_path / "workbench"
+    target = tmp_path / "published"
+    with Workbench.open(root) as workbench:
+        workbench.save("a", b"A")
+        marker = root / "outputs/unknown"
+        marker.write_bytes(b"keep")
+        with pytest.raises(OSError):
+            workbench.publish(target)
+        assert marker.read_bytes() == b"keep"
+        assert (target / "a").read_bytes() == b"A"
+        with pytest.raises(WorkbenchError, match="closed"):
+            workbench.results()
+
+
+@pytest.mark.parametrize("location", ["same", "parent", "child"])
+def test_protected_directory_overlap_is_rejected_before_creating_store(
+    tmp_path: Path, location: str
+) -> None:
+    protected = tmp_path / "project/src"
+    protected.mkdir(parents=True)
+    marker = protected / "keep"
+    marker.write_bytes(b"keep")
+    root = {
+        "same": protected,
+        "parent": protected.parent,
+        "child": protected / "workbench",
+    }[location]
+    with pytest.raises(ValueError, match="protected"):
+        Workbench.open(root, protected_roots=(protected,))
+    assert marker.read_bytes() == b"keep"
+    assert not (root / ".lock").exists()
+    assert not (root / "state.json").exists()
+    if location == "child":
+        assert not root.exists()
+
+
+def test_protected_directories_resolve_aliases_and_allow_separate_store(tmp_path: Path) -> None:
+    protected = tmp_path / "source"
+    protected.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(protected, target_is_directory=True)
+    with pytest.raises(ValueError, match="protected"):
+        Workbench.open(alias / "workbench", protected_roots=(protected,))
+    root = tmp_path / "workbench"
+    with Workbench.open(root, protected_roots=(alias, tmp_path / "other")) as workbench:
+        workbench.save("a", b"A")
+    with Workbench.open(root, protected_roots=(protected,)) as workbench:
+        assert workbench.contains("a")
+
+
+def test_protected_roots_requires_a_collection_of_paths(tmp_path: Path) -> None:
+    root = tmp_path / "workbench"
+    with pytest.raises(TypeError, match="iterable"):
+        Workbench.open(root, protected_roots=tmp_path / "source")
+    assert not root.exists()
