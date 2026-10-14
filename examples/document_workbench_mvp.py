@@ -290,10 +290,9 @@ def main() -> None:
         def capture_initial_snapshot(inputs_root: Path) -> None:
             _capture_run_inputs(inputs_root, source_root, document_root, tracker)
 
-        with DocumentRun.open_or_create(
+        DocumentRun.open_or_create(
             run_root, capture_inputs=capture_initial_snapshot
-        ):
-            pass
+        ).close()
 
         print("First pass: stop after one document to simulate interruption.")
         run_pending_documents(run_root, stop_after=1)
