@@ -81,14 +81,17 @@ class FileTracker:
         root: str,
         exclude_patterns: list[str] | None = None,
         baseline_dir: str | None = None,
+        include_patterns: list[str] | None = None,
     ):
         self.root = os.path.abspath(root)
+        self.include_patterns = tuple(include_patterns or [])
         self.exclude_patterns = tuple(exclude_patterns or [])
         if baseline_dir is None:
             baseline_dir = os.path.join(self.root, DEFAULT_BASELINE_SUBDIR)
         self.baseline = BaselineManager(baseline_dir)
         self.scanner = FileScanner(
             self.root,
+            include_patterns=self.include_patterns,
             exclude_patterns=self.exclude_patterns,
             baseline_dir=self.baseline.baseline_dir,
         )
@@ -103,7 +106,7 @@ class FileTracker:
 
         baseline_states: dict[Path, FileState] = {}
         for path, entry in old_manifest["files"].items():
-            if entry.get("exists", True):
+            if entry.get("exists", True) and self.scanner.matches(Path(path)):
                 baseline_states[Path(path)] = _entry_to_state(entry)
 
         working_states = self.scanner.scan()

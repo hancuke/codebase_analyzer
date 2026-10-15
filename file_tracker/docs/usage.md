@@ -18,6 +18,7 @@ from filetracker import ChangeStatus, FileTracker
 
 tracker = FileTracker(
     root="./src",
+    include_patterns=["**/*.py", "**/*.sql"],
     exclude_patterns=["**/__pycache__/**", "**/*.pyc"],
 )
 
@@ -34,6 +35,10 @@ tracker.commit(
     expected_baseline_revision=change_set.baseline_revision,
 )
 ```
+
+`include_patterns` limits tracking to matching POSIX relative paths; an empty or omitted
+list keeps all files. `exclude_patterns` takes precedence when a path matches both. The same
+scope is applied when comparing and committing baselines.
 
 `FileChange.baseline_content` and `FileChange.working_content` are `ContentSnapshot`
 instances. Rather than using ambiguous `None` values for every non-text case:
@@ -101,7 +106,7 @@ file_symbol_changes = symbol_tracker.extract_symbol_changes(file_change, options
 The CLI displays file-level data only:
 
 ```bash
-filetracker scan --root ./src --exclude "**/*.pyc"
+filetracker scan --root ./src --include "**/*.py" --exclude "**/generated/**"
 filetracker diff --root ./src
 filetracker commit --root ./src -m "initial baseline"
 filetracker undo --root ./src
@@ -113,6 +118,9 @@ filetracker undo --root ./src
 | `diff` | Outputs unified diffs for available text files |
 | `commit` | Saves the working directory as a new baseline |
 | `undo` | Restores the previous baseline |
+
+`--include` and `--exclude` accept one or more relative-path glob patterns and apply to all
+commands.
 
 Binary, undecodable, and unreadable files are still listed by `scan`; `diff` reports only
 their status and does not fabricate a text diff.

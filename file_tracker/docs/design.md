@@ -52,8 +52,8 @@ class FileChange:
 ```
 
 `files` is sorted by POSIX relative path. `baseline_revision` identifies the baseline at
-scan time; `working_revision` is calculated from the paths and content hashes of all working
-tree files. When passed to
+scan time; `working_revision` is calculated from the paths and content hashes of files in the
+configured scan scope. When passed to
 `commit(expected_revision=..., expected_baseline_revision=...)`, the commit is rejected if
 files or the baseline changed after the scan.
 
@@ -108,9 +108,12 @@ The Python parser preserves decorators, type annotations, default values, and re
 `SymbolState.declaration`; `SymbolState.content` and `body_hash` cover the complete source
 fragment.
 
-## Paths and Exclusion Rules
+## Paths and Scan Scope
 
-Every pattern in `FileTracker(root, exclude_patterns=...)` matches POSIX relative paths. For
-example, `generated` excludes that directory, `generated/**` excludes its contents, and
-`**/*.pyc` excludes pyc files in nested directories. Absolute paths are generated only by
-calling `FileTracker.resolve_path(relative_path)`.
+Every pattern in `FileTracker(root, include_patterns=..., exclude_patterns=...)` matches
+POSIX relative paths. Include patterns narrow the tracked file set; an empty include list
+means all files. Exclude patterns take precedence over includes. The selected scope is used
+consistently for scanning, baseline comparison, and commits. For example, `generated`
+excludes that directory, `generated/**` excludes its contents, and `**/*.pyc` excludes pyc
+files in nested directories. Absolute paths are generated only by calling
+`FileTracker.resolve_path(relative_path)`.

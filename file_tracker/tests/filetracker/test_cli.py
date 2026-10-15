@@ -45,6 +45,18 @@ def test_cli_undo_nothing(tmp_path, capsys):
     assert "Nothing to undo." in capsys.readouterr().out
 
 
+def test_cli_scan_accepts_include_patterns(tmp_path, capsys):
+    _write(tmp_path, "a.py", "x")
+    _write(tmp_path, "notes.txt", "x")
+
+    assert main(["scan", "--root", str(tmp_path), "--include", "**/*.py"]) == 0
+
+    out = capsys.readouterr().out
+    assert "1 added" in out
+    assert "[added] a.py" in out
+    assert "notes.txt" not in out
+
+
 def test_cli_diff_shows_file_level_unified_diff(tmp_path, capsys):
     _write(tmp_path, "m.py", "value = 1\n")
     assert main(["commit", "--root", str(tmp_path), "-m", "init"]) == 0

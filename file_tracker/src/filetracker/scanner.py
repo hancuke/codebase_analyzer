@@ -29,12 +29,15 @@ class FileScanner:
         root: str,
         exclude_patterns: list[str] | tuple[str, ...] | None = None,
         baseline_dir: str | None = None,
+        include_patterns: list[str] | tuple[str, ...] | None = None,
     ):
         self.root = os.path.abspath(root)
+        self.include_patterns = tuple(include_patterns or [])
         self.exclude_patterns = tuple(exclude_patterns or [])
         self.baseline_dir = os.path.abspath(baseline_dir) if baseline_dir else None
 
-    def _is_excluded(self, relative_path: Path) -> bool:
+    @staticmethod
+    def _matches_any(relative_path: Path, patterns: tuple[str, ...]) -> bool:
         path = relative_path.as_posix()
         return any(
             fnmatch.fnmatch(path, pattern)
@@ -42,7 +45,20 @@ class FileScanner:
                 pattern.startswith("**/")
                 and fnmatch.fnmatch(path, pattern.removeprefix("**/"))
             )
-            for pattern in self.exclude_patterns
+            for pattern in patterns
+        )
+
+    def _is_excluded(self, relative_path: Path) -> bool:
+        return self._matches_any(relative_path, self.exclude_patterns)
+
+    def matches(self, relative_path: Path) -> bool:
+        """Return whether a relative path is inside this scanner's file scope."""
+        return (
+            (
+                not self.include_patterns
+                or self._matches_any(relative_path, self.include_patterns)
+            )
+            and not self._is_excluded(relative_path)
         )
 
     def _is_baseline_path(self, abs_path: str) -> bool:
@@ -72,7 +88,7 @@ class FileScanner:
                 if self._is_baseline_path(abs_path):
                     continue
                 rel = Path(os.path.relpath(abs_path, self.root).replace(os.sep, "/"))
-                if self._is_excluded(rel):
+                if not self.matches(rel):
                     continue
                 states[rel] = self._state_for(rel, abs_path)
         return states

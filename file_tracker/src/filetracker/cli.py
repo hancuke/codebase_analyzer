@@ -15,6 +15,12 @@ def build_parser() -> argparse.ArgumentParser:
     def add_common(p: argparse.ArgumentParser) -> None:
         p.add_argument("--root", default=".", help="Root directory to track.")
         p.add_argument(
+            "--include",
+            nargs="*",
+            default=None,
+            help="Relative-path glob patterns to include (e.g. '**/*.py').",
+        )
+        p.add_argument(
             "--exclude",
             nargs="*",
             default=None,
@@ -41,7 +47,11 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     from filetracker.tracker import FileTracker
 
-    tracker = FileTracker(root=args.root, exclude_patterns=args.exclude)
+    tracker = FileTracker(
+        root=args.root,
+        include_patterns=args.include,
+        exclude_patterns=args.exclude,
+    )
 
     if args.command == "scan":
         changes = tracker.scan()

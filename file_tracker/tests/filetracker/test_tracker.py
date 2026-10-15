@@ -38,6 +38,22 @@ def test_scan_after_commit_is_clean(tmp_path):
     assert tracker.scan().has_changes is False
 
 
+def test_include_patterns_limit_scan_and_ignore_out_of_scope_baseline_files(tmp_path):
+    (tmp_path / "src").mkdir()
+    _write(tmp_path, "src/app.py", "v1")
+    _write(tmp_path, "README.md", "docs")
+    FileTracker(root=str(tmp_path)).commit()
+
+    tracker = FileTracker(root=str(tmp_path), include_patterns=["**/*.py"])
+    _write(tmp_path, "README.md", "updated docs")
+    _write(tmp_path, "src/app.py", "v2")
+
+    changes = tracker.scan()
+
+    assert [change.path for change in changes] == [Path("src/app.py")]
+    assert changes.files[0].status is ChangeStatus.MODIFIED
+
+
 def test_file_change_uses_immutable_content_snapshots(tmp_path):
     _write(tmp_path, "a.py", "v1")
     tracker = FileTracker(root=str(tmp_path))

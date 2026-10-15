@@ -26,6 +26,22 @@ def test_scanner_respects_exclude_patterns(tmp_path):
     assert set(states) == {Path("a.py")}
 
 
+def test_scanner_respects_include_patterns_and_exclusions(tmp_path):
+    (tmp_path / "root.py").write_text("x")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("x")
+    (tmp_path / "src" / "app.txt").write_text("x")
+    (tmp_path / "src" / "generated.py").write_text("x")
+
+    states = FileScanner(
+        str(tmp_path),
+        include_patterns=["**/*.py"],
+        exclude_patterns=["**/generated.py"],
+    ).scan()
+
+    assert set(states) == {Path("root.py"), Path("src/app.py")}
+
+
 def test_scanner_excludes_baseline_dir(tmp_path):
     baseline = tmp_path / ".filetracker" / "baseline"
     baseline.mkdir(parents=True)
