@@ -7,6 +7,10 @@ name = "document-workbench"
 version = "0.1.0"
 description = "Persistent input snapshots and resumable document-work progress."
 requires-python = ">=3.10"
+dependencies = ["document-updater"]
+
+[tool.uv.sources]
+document-updater = { workspace = true }
 
 [tool.setuptools]
 package-dir = {"" = "src"}

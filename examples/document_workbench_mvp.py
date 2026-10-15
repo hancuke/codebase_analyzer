@@ -1,4 +1,8 @@
-"""Demonstrate caller-driven document processing and durable checkpoints."""
+"""Resume fragment tasks across A/B phases, assemble documents, and publish.
+
+No original-document snapshot is captured. The caller must keep sources, original
+documents, and generation configuration unchanged throughout a batch and recovery.
+"""
 
 from __future__ import annotations
 
@@ -11,7 +15,7 @@ from change_analyzer import FunctionChange, analyze_changes
 from codegraph import OraclePlsqlAnalyzer, SourceFile
 from filetracker import ChangeSet
 from change_analyzer import FunctionChange
-from document_updater import DocumentResult, ResultKind, apply_result
+from document_updater import DocumentResult, ResultKind
 from document_workbench import Workbench
 from filetracker import FileTracker
 
@@ -90,49 +94,26 @@ def _write_changed_sources(source_root: Path) -> None:
     )
 
 
-def generate_document(changes: Sequence[FunctionChange], markdown: str) -> bytes:
-    """Render newly analyzed changes; a deterministic renderer stands in for the LLM."""
+def generate_fragments(changes: Sequence[FunctionChange]) -> tuple[DocumentResult, ...]:
+    """Generate fragment results; a deterministic renderer stands in for the LLM."""
+    results = []
     for change in changes:
         function = change.new_function
         kind = ResultKind.DELETE if function is None else ResultKind.UPSERT
         body = None
         if function is not None:
             body = f"## {function.name}\n\n```sql\n{function.source.rstrip()}\n```\n"
-        result = DocumentResult(
-            fragment_id=f"function:{change.function_id}", kind=kind, markdown=body
-        )
-        markdown = apply_result(markdown, result)
-    return markdown.encode("utf-8")
-
-
-def run_batch(
-    source_root: Path,
-    document_root: Path,
-    workbench_root: Path,
-    tracker: FileTracker,
-    *,
-    process: Callable[[str, Sequence[FunctionChange], str], bytes] | None = None,
-) -> None:
-    """Reanalyze, skip successful generation, and explicitly publish the results."""
-    with Workbench.open(workbench_root, protected_roots=(source_root,)) as workbench:
-        changes = tracker.scan()
-        for key, function_changes in analyze_documents(source_root, changes).items():
-            if workbench.contains(key):
-                continue
-            markdown = read_document(document_root / key)
-            content = (
-                generate_document(function_changes, markdown) if process is None
-                else process(key, function_changes, markdown)
+        results.append(
+            DocumentResult(
+                fragment_id=f"function:{change.function_id}", kind=kind, markdown=body
             )
-            workbench.save(key, content)
-        workbench.publish(document_root)
-
-
+        )
+    return tuple(results)
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="document-workbench-mvp-") as temp:
         project_root = Path(temp)
         source_root = project_root / "src"
-        run_root = project_root / ".workbench" / "run-1"
+        document_root = project_root / "documents"
         source_root.mkdir()
 
         _write_initial_sources(source_root)
@@ -145,23 +126,39 @@ def main() -> None:
         )
         _write_changed_sources(source_root)
 
-        def interrupt(key: str, changes: Sequence[FunctionChange], markdown: str) -> bytes:
-            if key == "docs/orders.md":
-                raise RuntimeError("simulated interruption")
-            print("Processed:", key)
-            return generate_document(changes, markdown)
+        def task_a(workbench: Workbench, *, interrupt: bool = False) -> None:
+            for key, changes in analyze_documents(source_root, tracker.scan()).items():
+                for change in changes:
+                    task_id = f"A:{change.function_id}"
+                    if workbench.contains_task(key, task_id):
+                        continue
+                    if interrupt and key == "docs/orders.md":
+                        raise RuntimeError("simulated interruption")
+                    workbench.save_task(key, task_id, generate_fragments((change,)))
+                    print("Processed:", task_id)
 
-        print("First pass: fail while processing the second document.")
+        print("Task A: fail after committing the first task's fragments.")
+        workbench = Workbench.open(document_root / ".workbench", protected_roots=(source_root,))
         try:
-            run_batch(source_root, project_root, run_root, tracker, process=interrupt)
+            task_a(workbench, interrupt=True)
         except RuntimeError as error:
             if str(error) != "simulated interruption":
                 raise
             print(error)
 
-        print("\nResume: skip saved results and finish pending documents.")
-        run_batch(source_root, project_root, run_root, tracker)
-        print("Workbench removed:", not run_root.exists())
+        print("\nResume A, then run B against the same sources and documents.")
+        workbench.close()
+        workbench = Workbench.open(document_root / ".workbench", protected_roots=(source_root,))
+        task_a(workbench)
+        for key in analyze_documents(source_root, tracker.scan()):
+            task_id = f"B:{key}"
+            if not workbench.contains_task(key, task_id):
+                workbench.save_task(key, task_id, (DocumentResult(
+                    "summary", ResultKind.UPSERT, "Summary supplied by task B."
+                ),))
+
+        workbench.publish(document_root)
+        print("Workbench removed:", not (document_root / ".workbench").exists())
         print("Baseline remains unchanged:", tracker.scan().has_changes)
 
 

@@ -59,7 +59,9 @@ language caller -> document_workbench (persistent run checkpoints)
 - `code_graph` 与 `file_tracker` 是相互独立的基础领域。
 - `change_analyzer` 可以组合二者，但基础领域不得反向依赖它。
 - `document_updater` 保持纯 fragment mutation。`document_workbench` 只持久化调用方提供的输入、
-  文档单元和结果，不依赖 `file_tracker`、`document_updater`、analyzer 或 LLM。
+  文档单元和结果，可依赖 `document_updater.DocumentResult` 持久化片段结果，
+  不依赖 `file_tracker`、analyzer 或 LLM；可通过 `assemble(document_root)`
+  读取原文并协调 `document_updater.apply_results`，合并规则仍属于 document_updater。
 - 调用方负责扫描、分析和按目标文档分组；一个目标文档的完整结果保存后标记该单元完成。
   恢复时跳过已完成单元并继续处理其他单元。
 - 跨包共享行为应通过最小公共类型或协议表达，不得通过导入内部实现来绕过边界。

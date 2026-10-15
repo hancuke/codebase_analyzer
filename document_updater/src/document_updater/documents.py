@@ -59,7 +59,6 @@ class DocumentResult:
                 "delete result must not contain Markdown"
             )
 
-
 @dataclass(frozen=True)
 class _ManagedDocument:
     prefix: str
@@ -72,27 +71,31 @@ def apply_result(
     result: DocumentResult,
 ) -> str:
     """Apply one fragment result to caller-selected Markdown."""
+    return apply_results(existing_markdown, (result,))
+
+
+def apply_results(
+    existing_markdown: str,
+    results: tuple[DocumentResult, ...],
+) -> str:
+    """Apply ordered results with one parse and render; empty results leave text intact.
+
+    Replacements retain their position. New or deleted-then-reinserted fragments
+    append in result order; repeated IDs are applied sequentially.
+    """
     document = _parse_document(existing_markdown)
-    fragments = list(document.fragments)
-    existing_index = next(
-        (
-            index
-            for index, fragment in enumerate(fragments)
-            if fragment.fragment_id == result.fragment_id
-        ),
-        None,
-    )
-    if result.kind is ResultKind.UPSERT:
-        if existing_index is None:
-            fragments.append(result)
+    if not results:
+        return existing_markdown
+    fragments = {fragment.fragment_id: fragment for fragment in document.fragments}
+    for result in results:
+        if result.kind is ResultKind.UPSERT:
+            fragments[result.fragment_id] = result
         else:
-            fragments[existing_index] = result
-    elif existing_index is not None:
-        del fragments[existing_index]
+            fragments.pop(result.fragment_id, None)
 
     updated = _ManagedDocument(
         prefix=document.prefix,
-        fragments=tuple(fragments),
+        fragments=tuple(fragments.values()),
         suffix=document.suffix,
     )
     return _render_document(updated)

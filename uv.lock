@@ -58,6 +58,12 @@ source = { editable = "document_updater" }
 name = "document-workbench"
 version = "0.1.0"
 source = { editable = "document_workbench" }
+dependencies = [
+    { name = "document-updater" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "document-updater", editable = "document_updater" }]
 
 [[package]]
 name = "exceptiongroup"

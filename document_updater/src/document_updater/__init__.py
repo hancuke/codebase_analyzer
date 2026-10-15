@@ -4,6 +4,7 @@ from .documents import (
     InvalidManagedDocumentError,
     ResultKind,
     apply_result,
+    apply_results,
     get_fragment_markdown,
 )
 
@@ -13,5 +14,6 @@ __all__ = [
     "InvalidManagedDocumentError",
     "ResultKind",
     "apply_result",
+    "apply_results",
     "get_fragment_markdown",
 ]

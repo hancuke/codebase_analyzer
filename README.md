@@ -37,8 +37,10 @@ file_tracker       code_graph
 ```
 
 `document_updater` 保持纯 Markdown fragment 合并。`document_workbench` 只管理成功结果检查点，
-不保存处理输入，不执行源码扫描、分析、生成或合并；显式 publish 负责结果写入和清理。
-这些业务规则由调用方及其他领域包负责。它不依赖 FileTracker 或 `document_updater`。
+不保存处理输入，不执行源码扫描、分析或生成；assemble 协调原文读取与片段合并，
+显式 publish 负责结果写入和清理。
+这些业务规则由调用方及其他领域包负责。它依赖 `document_updater.DocumentResult`
+存储片段结果，但不依赖 FileTracker。
 
 ## Minimal APIs
 
@@ -138,6 +140,10 @@ from document_updater import apply_result
 updated_markdown = apply_result(existing_markdown, result)
 ```
 
+多个片段使用 `apply_results(existing_markdown, tuple(results))`，只解析和渲染一次。
+已有片段替换保留位置，新片段按结果顺序追加；重复 ID 按顺序生效，删除后重新插入会移到末尾。
+空 tuple 保持原文不变，但仍校验受管标记是否合法。
+
 受管内容采用 `codegraph:fragment` markers。UPSERT 在缺失时插入、存在时替换；DELETE 幂等删除。
 `document_updater` 返回 Markdown 字符串，不执行物理文件删除。调用方拥有 fragment 来源、
 `fragment_id -> document key` 映射、分组和审核队列。`document_workbench` 保存完整文档结果，
@@ -176,25 +182,65 @@ UTF-16 读取，并只将 `CodeBehindForm` 行之后的 VBA 代码交给 CodeGra
 ```python
 from document_workbench import Workbench
 
-with Workbench.open(workbench_root, protected_roots=(source_root,)) as workbench:
-    changes = tracker.scan()
-    for document_key, analysis in analyze_documents(changes).items():
-        if workbench.contains(document_key):
-            continue
-        content = render_document(analysis).encode("utf-8")
-        workbench.save(document_key, content)
-    workbench.publish(document_root)
+workbench_root = document_root / ".workbench"
+workbench = Workbench.open(workbench_root, protected_roots=(source_root,))
+changes = tracker.scan()
+for document_key, analysis in analyze_documents(changes).items():
+    if workbench.contains(document_key):
+        continue
+    content = render_document(analysis)
+    workbench.save(document_key, content)
+
+# workbench 可跨函数传递；全部结果准备好后再显式发布。
+workbench.publish(document_root)
 
 # baseline 提交是额外步骤，不由 publish 执行。
 ```
 
-工作台不接收任务输入、Batch 或 prepare 回调。结果统一 bytes，调用方负责文本编码。
+工作台不接收任务输入、Batch 或 prepare 回调。结果统一为 UTF-8 文本，编码由工作台负责。
 results 返回已保存结果，不判断任务是否全量完成；调用方必须完成全部生成后再发布。
 结果保存完成不代表发布成功。显式 publish 内部复制发布，成功后关闭并清理工作台；
-发布失败保留检查点以便重试。with 退出不自动发布。tracker.commit 是调用方的额外步骤。
-同一批输入不变且仅允许单写者；输入变化时调用方清理重开。
+发布失败保留检查点以便重试。无需 with 或 finally 来释放资源；close 仅使当前对象失效，
+不删除结果。with 仍作为兼容接口保留，退出不自动发布。tracker.commit 是调用方的额外步骤。
+同一批执行及恢复期间，调用方保证源码、原始文档和生成配置不被外部修改，且仅允许单写者；
+输入变化时调用方保留必要数据并另开批次。工作台不固定原文快照，不检测外部编辑冲突。
+库不加锁、不检测目录占用。调用方保证同一个 document_root 同时只有一个实例操作；
+不同实例使用独立且互不嵌套的文档目录，不共享工作台。MVP 将工作台固定放在
+document_root / ".workbench"，调用方扫描文档时必须排除它，文档 key 不得指向工作台。
+MVP 读取未完成文档原文；generate_fragments 只生成片段结果，prepare_batch 使用 apply_results
+合并目标片段，再保存完整文本并返回 Workbench，调用方可稍后 publish；
+run_batch 是准备后立即发布的便利入口。生成与文本更新分开，无需复制文档目录。
+生成中断不修改正式文档；部分发布失败则复用已保存结果重试发布，不重新生成。
+其他示例的 DocumentPublisher 直接发布流程不受影响。
 protected_roots 声明不可与工作台重叠的目录，路径校验由 open 内部执行。
-存储 schema 为 4，旧 schema 1/2/3 明确拒绝，不自动升级。
+存储 schema 为 7，可恢复 schema 5，后续状态提交写为 7；旧 schema 1/2/3/4/6 明确拒绝。
+schema 6 的不透明文本任务需用此前版本完成后再升级。
+此前 schema 5 留下的普通 .lock 文件仍可读取，发布后清理，但不再用于互斥。
+
+同一批工作分 A/B 阶段且共享文档时，Workbench 按 `(document_key, task_id)`
+保存 `tuple[DocumentResult, ...]` 检查点，不将 A 的部分结果当作完整文档：
+
+```python
+workbench = Workbench.open(document_root / ".workbench", protected_roots=(source_root,))
+for task in tasks_a + tasks_b:
+    if not workbench.contains_task(task.document_key, task.id):
+        workbench.save_task(task.document_key, task.id, generate(task))
+workbench.publish(document_root)  # 调用方确认全部阶段完成，自动组装后发布
+```
+
+任务项全部片段以稳定任务 ID 持久化，A 中途失败后可跳过已提交项；一个任务项对应一份文档。
+合并按任务 ID 字典序、任务内部片段顺序执行，重复 fragment ID 沿用顺序应用规则。
+首次 save 完整文档前自动持久化冻结任务集合，无需 seal_tasks；冻结后禁止添加任务。
+task_results(document_key) 返回按任务 ID 排序的只读 mapping，值为不可变的结果 tuple；
+task_documents() 枚举有任务记录的文档。任务结果与冻结标记位于 `.workbench/state.json`，
+完整文档单独保存；publish 自动组装尚未保存的任务文档，
+全部组装成功后才发布完整文档，成功后统一清理。
+`document_workbench.TaskResult` 封装 document_key、task_id 和结果 tuple，
+通过 `to_dict()` / `from_dict()` 负责检查点序列化与校验，不修改 DocumentResult。
+Workbench 负责原子落盘；assemble 读取尚未保存文档的原文（不存在时为空），
+调用 apply_results 并复用 save 保存完整文本。它不修改正式文档，重试跳过已保存文档，
+原文读取或合并错误明确传播；调用方仍负责确认阶段完整性与保证输入不变。
+也可独立调用 assemble，在发布前检查组装结果；仅通过 save 保存完整文本的流程保持不变。
 
 ## Setup and validation
 

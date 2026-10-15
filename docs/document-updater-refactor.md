@@ -29,6 +29,7 @@ class DocumentResult:
 
 def get_fragment_markdown(markdown: str, fragment_id: str) -> str | None: ...
 def apply_result(markdown: str, result: DocumentResult) -> str: ...
+def apply_results(markdown: str, results: tuple[DocumentResult, ...]) -> str: ...
 ```
 
 `UPSERT` contains the entire fragment body; `DELETE` has no body. `apply_result()` is pure
@@ -36,6 +37,13 @@ and deterministic: it parses canonical markers, inserts/replaces/removes one fra
 returns the resulting Markdown. Callers compare input and output when they need to know whether
 it changed. It preserves caller-owned Markdown outside the managed fragment region and rejects
 malformed or ambiguous marker input.
+
+`apply_results()` parses once, applies results in order, and renders once.
+Replacement preserves position; insertion appends; deletion followed by reinsertion
+appends at the end. Repeated IDs are applied sequentially. An empty tuple validates
+markers but returns the original text unchanged. `apply_result()` delegates to this
+batch operation. Prefix and suffix remain attached to the document throughout the
+batch, including when all original fragments are deleted before new ones are added.
 
 This package does **not** include Entry plans, source paths, document keys, stores, prompt
 blocks, prompt renderers, LLM clients, authors, perspectives, mergers, review queues, or
@@ -45,7 +53,8 @@ batch publication types. Those terms describe caller-specific policies, not frag
 
 The caller owns a mapping from document key to `DocumentResult` values. A key with an empty
 result collection is a participating document with no mutation. Before publishing, it verifies
-that every fragment ID occurs at most once per document, folds `apply_result()` in its chosen
+that every fragment ID occurs at most once per document if its policy requires it, applies
+`apply_results()` in its chosen
 stable order, then persists the Markdown. It may remove an empty physical document and advances
 the FileTracker baseline only after all publishing succeeds.
 
