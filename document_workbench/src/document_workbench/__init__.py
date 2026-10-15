@@ -1,4 +1,4 @@
-from .errors import WorkbenchError
-from .workbench import Workbench
+ 
+from .workbench import Workbench,WorkbenchError
 
 __all__ = ["Workbench", "WorkbenchError"]

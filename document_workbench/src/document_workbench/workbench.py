@@ -11,13 +11,15 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path
 from types import MappingProxyType
 from typing import BinaryIO
-
-from .errors import WorkbenchError
+ 
 
 
 _SCHEMA_VERSION = 4
 _STATE_NAME = "state.json"
 _TEMP_PREFIX = ".state-"
+
+class WorkbenchError(Exception):
+    """Invalid, incompatible, busy, or damaged workbench storage."""
 
 
 def _validate_keys(keys: Iterable[str]) -> None:
