@@ -29,7 +29,7 @@ def test_task_pairs_recover_in_order_and_publish_only_documents(tmp_path: Path) 
     assert not resumed.contains_task("a.md", "missing")
     assert resumed.task_documents() == ("a.md", "b.md")
     assert tuple(resumed.task_results("a.md").items()) == (
-        ("A", _results("first")), ("B", _results("second")),
+        ("B", _results("second")), ("A", _results("first")),
     )
     assert resumed.task_results("b.md") == {"A": ()}
     assert resumed.task_results("unknown.md") == {}
@@ -267,7 +267,7 @@ def test_assemble_preserves_originals_and_orders_fragment_mutations(tmp_path: Pa
         assert outputs["a.md"].startswith("# Manual\n")
         assert get_fragment_markdown(outputs["a.md"], "keep") == "Keep me"
         assert get_fragment_markdown(outputs["a.md"], "remove") is None
-        assert get_fragment_markdown(outputs["a.md"], "same") == "Final"
+        assert get_fragment_markdown(outputs["a.md"], "same") == "First"
         assert get_fragment_markdown(outputs["new/nested.md"], "fragment") == "New"
         assert outputs["empty.md"] == empty_original
         assert outputs["missing.md"] == ""
@@ -275,6 +275,45 @@ def test_assemble_preserves_originals_and_orders_fragment_mutations(tmp_path: Pa
         assert not (tmp_path / "new").exists()
         with pytest.raises(WorkbenchError, match="frozen"):
             workbench.save_task("a.md", "C", ())
+
+
+@pytest.mark.parametrize("existing_document", [False, True])
+def test_publish_preserves_task_save_order_across_recovery(
+    tmp_path: Path, existing_document: bool,
+) -> None:
+    root = tmp_path / ".workbench"
+    document = tmp_path / "a.md"
+    if existing_document:
+        document.write_text(apply_results("# Manual\n", _results("Original body")))
+    with Workbench.open(root) as workbench:
+        workbench.save_task("a.md", "Z", (
+            DocumentResult("zeta", ResultKind.UPSERT, "Zeta body"),
+            DocumentResult("fragment", ResultKind.UPSERT, "Earlier body"),
+        ))
+        workbench.save_task("a.md", "B", (
+            DocumentResult("alpha", ResultKind.UPSERT, "Alpha body"),
+        ))
+        assert tuple(workbench.task_results("a.md")) == ("Z", "B")
+    with Workbench.open(root) as resumed:
+        assert tuple(resumed.task_results("a.md")) == ("Z", "B")
+        resumed.save_task("a.md", "A", (
+            DocumentResult("fragment", ResultKind.UPSERT, "Latest body"),
+            DocumentResult("omega", ResultKind.UPSERT, "Omega body"),
+        ))
+    with Workbench.open(root) as resumed:
+        assert tuple(resumed.task_results("a.md")) == ("Z", "B", "A")
+        resumed.publish(tmp_path)
+    published = document.read_text()
+    assert get_fragment_markdown(published, "fragment") == "Latest body"
+    bodies = (
+        ("Latest body", "Zeta body", "Alpha body", "Omega body")
+        if existing_document
+        else ("Zeta body", "Latest body", "Alpha body", "Omega body")
+    )
+    positions = tuple(published.index(body) for body in bodies)
+    assert positions == tuple(sorted(positions))
+    if existing_document:
+        assert published.startswith("# Manual\n")
 
 
 def test_assemble_retry_skips_saved_documents_after_output_failure(

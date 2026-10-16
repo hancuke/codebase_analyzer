@@ -1,5 +1,6 @@
 """Resume fragment tasks across A/B phases, assemble documents, and publish.
 
+Tasks merge in per-document save order, preserved across recovery.
 No original-document snapshot is captured. The caller must keep sources, original
 documents, and generation configuration unchanged throughout a batch and recovery.
 """

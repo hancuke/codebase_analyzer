@@ -229,9 +229,9 @@ workbench.publish(document_root)  # 调用方确认全部阶段完成，自动�
 ```
 
 任务项全部片段以稳定任务 ID 持久化，A 中途失败后可跳过已提交项；一个任务项对应一份文档。
-合并按任务 ID 字典序、任务内部片段顺序执行，重复 fragment ID 沿用顺序应用规则。
+合并按单个文档的任务保存顺序、任务内部片段顺序执行，恢复后保留顺序；重复 fragment ID 沿用顺序应用规则。
 首次 save 完整文档前自动持久化冻结任务集合，无需 seal_tasks；冻结后禁止添加任务。
-task_results(document_key) 返回按任务 ID 排序的只读 mapping，值为不可变的结果 tuple；
+task_results(document_key) 返回按任务保存顺序排列的只读 mapping，值为不可变的结果 tuple；
 task_documents() 枚举有任务记录的文档。任务结果与冻结标记位于 `.workbench/state.json`，
 完整文档单独保存；publish 自动组装尚未保存的任务文档，
 全部组装成功后才发布完整文档，成功后统一清理。

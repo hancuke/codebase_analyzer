@@ -30,7 +30,7 @@ For multi-phase A/B generation, Workbench persists each finished task's ordered
 `tuple[DocumentResult, ...]` under a document/task pair. Reopening skips committed pairs, including when
 a phase was interrupted. The caller confirms all phases complete and invokes
 `assemble(document_root)` to read originals, apply restored task results in
-task-ID order, and save complete text without changing originals.
+per-document save order (preserved across recovery), and save complete text without changing originals.
 Missing originals are empty; read and mutation errors propagate. The first full-document save
 automatically freezes task collection before output writing; further task writes
 are rejected after recovery as well. Assembly retries skip saved documents and

@@ -291,12 +291,12 @@ class Workbench:
         self._commit_state(self._completed, tasks=tasks)
 
     def task_results(self, document_key: str) -> Mapping[str, tuple[DocumentResult, ...]]:
-        """Return ordered immutable task results, or an empty mapping."""
+        """Return immutable task results in save order, or an empty mapping."""
         self._ensure_open()
         _validate_keys((document_key,))
         return MappingProxyType({
             task_id: checkpoint.results
-            for task_id, checkpoint in sorted(self._tasks.get(document_key, {}).items())
+            for task_id, checkpoint in self._tasks.get(document_key, {}).items()
         })
 
     def task_documents(self) -> tuple[str, ...]:
@@ -307,7 +307,7 @@ class Workbench:
     def assemble(self, document_root: str | os.PathLike[str]) -> None:
         """Merge task documents after the caller confirms generation is complete.
 
-        Task IDs sort lexically; fragment order within each task is preserved.
+        Tasks follow save order; fragment order within each task is preserved.
         Missing originals are empty documents. Saved documents are verified and
         skipped on retries. Originals are never modified by assembly.
         """
@@ -529,7 +529,7 @@ class Workbench:
             "tasks": {
                 key: {
                     task_id: checkpoint.to_dict()
-                    for task_id, checkpoint in sorted(results.items())
+                    for task_id, checkpoint in results.items()
                 }
                 for key, results in sorted((self._tasks if tasks is None else tasks).items())
             },
@@ -543,7 +543,7 @@ class Workbench:
         temporary = Path(name)
         try:
             with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-                json.dump(state, stream, ensure_ascii=True, allow_nan=False, sort_keys=True)
+                json.dump(state, stream, ensure_ascii=True, allow_nan=False)
                 stream.write("\n")
                 stream.flush()
                 os.fsync(stream.fileno())

@@ -36,7 +36,8 @@ imply complete documents. The first full-document save persists a frozen task
 set before writing the document. Later task additions are rejected, including
 after recovery. The caller confirms all phases complete and invokes
 `assemble(document_root)`, which reads unsaved originals (missing means empty),
-merges task results in task-ID order, and saves full text without publishing.
+merges task results in per-document save order (preserved across recovery), and
+saves full text without publishing.
 Retries skip saved documents; read and mutation errors propagate.
 `publish(document_root)` automatically assembles unsaved task documents before
 publishing any full text. Assembly failures publish nothing; publication retries
