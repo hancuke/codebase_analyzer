@@ -1,0 +1,18 @@
+[variables]
+prompt_root = 'C:\access-doc\example\access\prompts'
+
+[project]
+system_id = "rms"
+env_id = "prod"
+
+[paths]
+source_root = 'C:\spec-backbone\workspace\rms_bank-prod-extract\rmsdev'
+document_root = 'C:\spec-backbone\workspace\rms_bank-spec\specs\access'
+log_file = 'C:\spec-backbone\logs\rms\form.log'
+lookup_ref_csv_path = 'C:\spec-backbone\workspace\rms_bank-spec\lookup_ref1.csv'
+table_file_folder_path = 'C:\spec-backbone\workspace\rms_bank-spec\schema\tables_views'
+
+[prompts]
+sys_prompt_directory = '${prompt_root}'
+ui_user_prompt_directory = '${prompt_root}\ui_user_prompts'
+vba_user_prompt_directory = '${prompt_root}\vba_user_prompts'

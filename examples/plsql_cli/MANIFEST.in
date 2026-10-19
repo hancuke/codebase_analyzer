@@ -1,2 +1,3 @@
 include configs/*.toml
+include ACCESS.md
 include tests/conftest.py

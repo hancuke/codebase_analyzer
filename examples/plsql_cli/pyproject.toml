@@ -5,12 +5,13 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "plsql-doc-cli-example"
 version = "0.1.0"
-description = "Copyable CLI adapter for an application's PLSQLService."
+description = "Copyable CLI adapters for an application's PLSQLService and AccessService."
 requires-python = ">=3.10"
 dependencies = ["tomli>=2; python_version < '3.11'"]
 
 [project.scripts]
 plsql-docs = "plsql_doc_cli.cli:main"
+access-docs = "access_doc_cli.cli:main"
 
 [dependency-groups]
 dev = ["pytest>=9.0"]

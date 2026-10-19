@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
@@ -16,7 +16,7 @@ class Detail(str, Enum):
     FULL = "full"
 
 
-@dataclass(frozen=True)
+@dataclass
 class RunOptions:
     source_root: Path = field(metadata={"section": "paths", "must_exist": True})
     document_root: Path = field(metadata={"section": "paths"})
@@ -120,9 +120,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
-        options = replace(load_options(args.config), detail=Detail(args.detail))
+        options = load_options(args.config)
     except ConfigError as error:
         parser.error(str(error))
+    options.detail = Detail(args.detail)
     return run(options)
 
 

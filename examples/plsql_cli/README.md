@@ -1,5 +1,8 @@
 # PL/SQL 文档 CLI 示例
 
+同一示例包也提供 `access-docs`，复用通用校验器、独立维护 Access 运行字段和两阶段流程，
+详见 [Access CLI](ACCESS.md)。
+
 项目参数只通过 `--config` 选择，**路径、系统标识、日志位置、Prompt 根目录和匹配规则全部写在 TOML**，
 不支持命令行覆盖，也没有 `config.py`。
 
@@ -121,8 +124,16 @@ env_id: str = field(default="prod", metadata={"section": "project"})
 
 ### CLI 专属枚举字段
 
-业务枚举在 `cli.py` 中定义，`argparse choices` 校验字符串，入口转换为枚举后通过
-`dataclasses.replace()` 写入不可变运行输入：
+业务枚举在 `cli.py` 中定义，`argparse choices` 校验字符串。`RunOptions` 使用普通
+`@dataclass`，入口加载配置后直接赋值：
+
+```python
+options = load_options(args.config)
+options.detail = Detail(args.detail)
+```
+
+只在入口完成本次参数赋值，随后交给 `run(options)`；dataclass 赋值本身不会自动校验类型，
+枚举转换由 `Detail(args.detail)` 负责：
 
 ```python
 class Detail(str, Enum):

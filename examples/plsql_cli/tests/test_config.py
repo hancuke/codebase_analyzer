@@ -1,5 +1,5 @@
 import os
-from dataclasses import FrozenInstanceError, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
@@ -29,8 +29,13 @@ def test_config_paths_are_relative_to_file_not_cwd(config_path, tmp_path, monkey
     assert options.include_special == ("special_*",)
     assert not options.document_root.exists()
     assert not options.log_file.parent.exists()
-    with pytest.raises(FrozenInstanceError):
-        options.system_id = "other"
+
+
+def test_run_options_can_be_updated_after_loading(config_path):
+    options = load(config_path)
+    options.detail = cli.Detail.FULL
+    assert options.detail is cli.Detail.FULL
+    assert load(config_path).detail is cli.Detail.SUMMARY
 
 
 def test_config_defaults_and_default_filename(config_path, monkeypatch):
@@ -120,7 +125,7 @@ def test_removed_overrides_are_rejected(config_path, flag, capsys):
 
 
 def test_new_field_declaration_controls_loading_and_validation(config_path, monkeypatch):
-    @dataclass(frozen=True)
+    @dataclass
     class ExtendedOptions(cli.RunOptions):
         owner: str = field(metadata={"section": "project"})
 

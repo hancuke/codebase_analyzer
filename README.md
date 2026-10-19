@@ -164,6 +164,8 @@ producer 生成自己的 `DocumentResult`，可与 Entry fragment 共享同一 c
 [`examples/plsql_cli/`](examples/plsql_cli/README.md)：项目参数仅在 TOML 维护，CLI 只选择配置文件，
 固定执行两阶段流程，调用形式为 `uv run plsql-docs run --config configs/rms-prod.toml`。
 示例不包含外部项目的 `processor` / `infra` 服务实现。
+同包的 [Access CLI](examples/plsql_cli/ACCESS.md) 提供
+`uv run access-docs run --config configs/access-rms-prod.toml`，顺序分析 UI 与入口后统一发布。
 
 ```bash
 uv run python examples/initial_documentation.py
