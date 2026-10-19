@@ -1,20 +1,24 @@
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 from functools import lru_cache
 from pathlib import PurePath
+from typing import Sequence
 
 from pygments.lexers import get_lexer_by_name
 from pygments.token import Comment, Name, String, Text
 
 from .analyzer import BaseAnalyzer, RawCall
 from .model import (
+    AnalysisResult,
     Diagnostic,
     EntryPoint,
     Function,
     SourceFile,
     SourceRange,
 )
+from .vba_constants import attach_constants
 
 
 _PROCEDURE_START = re.compile(
@@ -65,6 +69,14 @@ class VbaAnalyzer(BaseAnalyzer):
         """Release cached syntax facts without changing existing snapshots."""
         self._cached_functions.cache_clear()
         self._cached_raw_calls.cache_clear()
+
+    def analyze(self, files: Sequence[SourceFile]) -> AnalysisResult:
+        result = super().analyze(files)
+        functions, diagnostics = attach_constants(files, result.functions)
+        return replace(
+            result, functions=functions,
+            diagnostics=result.diagnostics + diagnostics,
+        )
 
     def extract_functions(
         self, source_file: SourceFile

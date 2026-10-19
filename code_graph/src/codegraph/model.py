@@ -26,6 +26,18 @@ class SourceRange:
 
 
 @dataclass(frozen=True)
+class Constant:
+    name: str
+    module: str
+    source_id: str
+    source: str
+    source_range: SourceRange
+    visibility: str
+    type_name: str | None = None
+    expression: str = ""
+
+
+@dataclass(frozen=True)
 class Function:
     id: str
     name: str
@@ -35,9 +47,11 @@ class Function:
     source: str
     source_range: SourceRange
     attributes: Mapping[str, object] = field(default_factory=dict)
+    constants: tuple[Constant, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "attributes", MappingProxyType(dict(self.attributes)))
+        object.__setattr__(self, "constants", tuple(self.constants))
 
     @property
     def qualified_name(self) -> str:

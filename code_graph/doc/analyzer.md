@@ -29,6 +29,17 @@ class PythonAnalyzer(BaseAnalyzer):
 The base class handles analyzer batching, symbol indexing, call resolution, unresolved-call
 diagnostics, entry-point detection, and `AnalysisResult` construction.
 
+VBA batch analysis additionally attaches directly referenced module constants to
+`Function.constants`. `VbaAnalyzer.analyze()` collects declarations for the current
+batch and resolves visibility and local shadowing without changing function source
+or calls. `extract_functions()` alone remains syntax-only and does not attach
+cross-file constants. Associations are recalculated for each batch, independently
+of the existing function/raw-call syntax caches. Other analyzers keep the empty
+default tuple; no new analyzer hook or protocol method is required.
+Constant extraction is a lightweight supported-syntax analysis, not a complete VBA
+semantic parser. Declaration collection, function-use extraction, and scope
+resolution are separate internal stages; no LSP service or generated grammar is required.
+
 ## Language analyzer protocol
 
 For a custom pipeline, implement:

@@ -46,6 +46,11 @@ its type or interpretation.
 | `Function` | `name`, `language`, `module`, `source_id`, `source` | `str` | Function identity, language, owning module, source identifier, and complete function source. `source_id` uses the same convention as `SourceFile.source_id`. |
 | `Function` | `source_range` | `SourceRange` | Location of the complete function in `source_id`. |
 | `Function` | `attributes` | `Mapping[str, object]` | Optional language-specific descriptive metadata. The exposed mapping is immutable; it is not an extension mechanism for core behavior. |
+| `Function` | `constants` | `tuple[Constant, ...]` | Directly referenced module constants, default empty; VBA batch analysis orders them by source identifier, declaration line, and normalized name. No transitive constant expansion. |
+| `Constant` | `name`, `module`, `source_id`, `source`, `visibility` | `str` | Name, owning module, original declaration location/text, and effective visibility. Multiple constants can share one full declaration. |
+| `Constant` | `source_range` | `SourceRange` | One-based inclusive declaration lines. |
+| `Constant` | `type_name` | `str \| None` | Explicit declared type, if present. |
+| `Constant` | `expression` | `str` | Unevaluated expression text; continuation formatting may be normalized. |
 | `Call` | `source_id`, `name` | `str` | Calling function ID and original source-level call name. |
 | `Call` | `line` | `int` | One-based source line in the calling function's file. |
 | `Call` | `target_id`, `evidence` | `str \| None` | Reliable resolved target and optional explanation of the resolution. A missing target means the call remains a fact but is not a graph edge. |
@@ -167,6 +172,7 @@ between the core, analyzers, and downstream callers.
 | `SourceFile` | Yes | Complete source text, stable source identifier, optional language hint |
 | `SourceRange` | Yes | One-based inclusive function location |
 | `Function` | Yes | Stable identity, source ownership, source text, and attributes |
+| `Constant` | Optional | Immutable declaration attached to functions that reference it; no independent Codebase index |
 | `Call` | Yes | Call-site fact and optional reliable target |
 | `Diagnostic` | Yes | Structured expected problem with location |
 | `ContextLimits` | Yes | Explicit bounds for context generation |
@@ -176,6 +182,9 @@ between the core, analyzers, and downstream callers.
 
 `Function.attributes` is intentionally an open mapping because language-specific
 metadata differs. It must remain descriptive metadata, not a second hidden control API.
+`Function.constants` participates in dataclass value equality; two functions can have
+identical original source but different attached constants. The existing change
+analyzer still compares original `source`, not full value equality.
 
 ## Language analyzer extension API
 

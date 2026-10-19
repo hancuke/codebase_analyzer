@@ -108,6 +108,59 @@ can filter by name, qualified name, file, language, module, or an attribute key/
 Unknown IDs raise `FunctionNotFoundError`; use `get_function()` when a nullable lookup is
 more convenient.
 
+## Include directly referenced VBA constants
+
+Batch analysis attaches the module-level constants directly referenced by each
+function. The original `source` and its line range are unchanged:
+
+```python
+constants_demo = Codebase.analyze(
+    [SourceFile("Settings.bas", '''
+Private Const PREFIX As String = "Order"
+Public Const RETRIES As Long = 3
+Private Const UNUSED As Long = 99
+Public Sub Save()
+    Debug.Print PREFIX, RETRIES
+End Sub
+'''.lstrip())],
+    [VbaAnalyzer()],
+)
+function = constants_demo.function("vba:Settings:Save")
+assert [item.name for item in function.constants] == ["PREFIX", "RETRIES"]
+# The caller owns context formatting and sending it to an LLM.
+declarations = dict.fromkeys(constant.source for constant in function.constants)
+code_for_llm = "\n\n".join((*declarations, function.source))
+```
+
+`constants` is an immutable tuple of frozen `Constant` values containing the name,
+module, source identifier, original declaration, inclusive line range, visibility,
+optional type, and expression text. Unused constants are not exposed. References
+are case-insensitive and respect parameters and declared local-variable/constant
+shadowing. Public constants in other standard modules can be referenced with or
+without their module qualifier; Private and unqualified module-level Const
+declarations remain local. Object members are not treated as module constants.
+
+Standard modules are recognized as `.bas` or `Module_*.txt`; instance modules as
+`.cls`, `.frm`, `Form_*.txt`, or class export metadata. `.txt` inputs still need an
+explicit `language="vba"` hint. Other module kinds do not acquire assumed global
+visibility: unresolved module kinds, ambiguous names, and unsupported related
+declarations produce diagnostics rather than guessed associations. Conditional
+Const declarations are not evaluated.
+
+The library does not assemble supplemental source text. Callers format
+`function.constants` alongside `function.source` and choose whether to send the
+result to an LLM. Expressions are not evaluated and constants referenced only by
+other constants are not expanded. A multi-name declaration is preserved whole;
+several constants can share the same `source` and declaration range. Callers can
+deduplicate by source identifier and range when combining multiple functions.
+Combined declarations are reading material, not necessarily a compilable module.
+
+Existing prompts do not change. For a call-chain context, callers can inspect
+`constants` on each selected function.
+`ContextLimits.max_source_chars` still counts only original function source, not
+these supplemental declarations. Const-only changes do not automatically trigger
+the current function-source-based change-impact analysis.
+
 ## Inspect calls and dependencies
 
 ```python
