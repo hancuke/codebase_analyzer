@@ -1,0 +1,21 @@
+[variables]
+prompt_root = "C:/access-doc/example/plsql/prompts"
+
+[project]
+system_id = "rms"
+env_id = "prod"
+
+[paths]
+source_root = "C:/spec-backbone/workspace/rms_bank-master/stored_proc"
+document_root = "C:/spec-backbone/workspace/rms_bank-spec/specs/pkg"
+log_file = "C:/spec-backbone/logs/rms/plsql.log"
+
+[prompts]
+sys_prompt_directory = "${prompt_root}"
+simple_user_prompt_directory = "${prompt_root}/simple_user_prompts"
+complex_user_prompt_directory = "${prompt_root}/complex_user_prompts"
+special_user_prompts = "${prompt_root}/special_user_prompts"
+
+[patterns]
+exclude = ["pkg_schd_0*", "PKG_SCHD_0*"]
+include_special = ["pkg_schd_0*", "PKG_SCHD_0*"]
