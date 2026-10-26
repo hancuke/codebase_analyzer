@@ -100,8 +100,8 @@ def test_prompt_paths_are_independent_config_values(config_path, host):
     }
     for original, replacement in replacements.items():
         (config_path.parent / replacement).mkdir()
-        text = text.replace(f'"{original}"', f'"{replacement}"')
-    config_path.write_text(text.replace('[variables]\nprompt_root = "prompts"\n', ""))
+        text = text.replace(f'"{original}"', f'"{config_path.parent.as_posix()}/{replacement}"')
+    config_path.write_text(text)
     assert main(["run", "--config", str(config_path)]) == 0
     assert calls["normal"]["sys_prompt_directory"] == config_path.parent / "system-templates"
     assert calls["special"]["sys_prompt_directory"] == config_path.parent / "system-templates"

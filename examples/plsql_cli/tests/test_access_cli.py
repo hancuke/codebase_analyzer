@@ -15,11 +15,13 @@ def access_config(tmp_path):
     (tmp_path / "lookup.csv").write_text("form,table\n")
     path = tmp_path / "access-docs.toml"
     path.write_text(
-        '[variables]\nprompt_root = "prompts"\n'
+        f'[variables]\nprompt_root = "{tmp_path.as_posix()}/prompts"\n'
         '[project]\nsystem_id = "rms"\nenv_id = "prod"\n'
-        '[paths]\nsource_root = "source"\ndocument_root = "docs"\n'
-        'log_file = "logs/form.log"\nlookup_ref_csv_path = "lookup.csv"\n'
-        'table_file_folder_path = "tables"\n'
+        f'[paths]\nsource_root = "{tmp_path.as_posix()}/source"\n'
+        f'document_root = "{tmp_path.as_posix()}/docs"\n'
+        f'log_file = "{tmp_path.as_posix()}/logs/form.log"\n'
+        f'lookup_ref_csv_path = "{tmp_path.as_posix()}/lookup.csv"\n'
+        f'table_file_folder_path = "{tmp_path.as_posix()}/tables"\n'
         '[prompts]\nsys_prompt_directory = "${prompt_root}"\n'
         'ui_user_prompt_directory = "${prompt_root}/ui"\n'
         'vba_user_prompt_directory = "${prompt_root}/vba"\n',
@@ -82,7 +84,7 @@ def test_success_forwards_config_and_ui_mapping(access_config, host, monkeypatch
     events, calls, controls = host
     monkeypatch.chdir(access_config.parent)
     options = cli.load_options(access_config)
-    assert cli.main(["run"]) == 0
+    assert cli.main(["run", "--config", access_config.name]) == 0
     assert events == ["logging", "open", "service", "init", "ui", "entries", "publish", "shutdown"]
     assert calls["service"] == {
         "source_root": options.source_root, "document_root": options.document_root,
@@ -157,7 +159,8 @@ def test_missing_required_resource_is_input_error(access_config, host, field, ca
     resource = getattr(options, field)
     lines = access_config.read_text().splitlines()
     access_config.write_text("\n".join(
-        f'{field} = "missing-resource"' if line.startswith(f"{field} = ") else line
+        f'{field} = "{access_config.parent.as_posix()}/missing-resource"'
+        if line.startswith(f"{field} = ") else line
         for line in lines
     ))
     with pytest.raises(SystemExit) as error:

@@ -1,84 +1,118 @@
-# Access 文档 CLI
+# Access 文档生成使用指南
 
-与同目录 PL/SQL 示例使用相同方式：业务字段在 `access_doc_cli/cli.py` 的普通 dataclass
-`RunOptions` 中声明，复用 `plsql_doc_cli/validation.py` 通用加载器，不修改领域包。
+`access-docs` 生成界面和入口文档，两个阶段均成功后发布结果。
+以下命令在已安装此工具及生成服务的应用项目中运行。
+
+## 使用配置文件（推荐）
+
+复制 [配置模板](configs/access-rms-prod.toml)，修改路径和项目标识：
 
 ```bash
-# 实际应用项目中
 uv run access-docs run --config configs/access-rms-prod.toml
-# 默认读取当前目录 access-docs.toml
-uv run access-docs run
 ```
 
-Access 命令只接受 `--config`（及内置 help），不提供路径覆盖、模式或额外输出选项。
+查看全部参数：
 
-## 复制到实际项目
-
-复制 `src/access_doc_cli/` 及 `src/plsql_doc_cli/validation.py`（保留对应包的
-`__init__.py`），或将通用校验器移入目标项目的公共模块并修改导入。无需复制 PL/SQL 的
-`cli.py`。实际项目提供 `processor.AccessConfig`、`processor.AccessService`、Workbench
-及 infra 日志和 Phoenix tracing。
-
-合并脚本注册到现有 `pyproject.toml`，确保包发现包含 CLI 模块：
-
-```toml
-[project.scripts]
-access-docs = "access_doc_cli.cli:main"
+```bash
+uv run access-docs run --help
 ```
 
-Python 3.10 需合并 `"tomli>=2; python_version < '3.11'"` 到依赖；之后在目标项目 `uv sync`。
-不要覆盖实际项目的 pyproject，也不要复制本例独立 workspace 的隔离配置。
+## 不使用配置文件
 
-## 配置
+不传 `--config` 时，必须完整提供下面的业务参数，不会自动读取默认配置文件。
+**不能将 `--config` 与业务参数混用，也不支持命令行覆盖配置文件。**
 
-完整用户路径见 [`configs/access-rms-prod.toml`](configs/access-rms-prod.toml)。
-Windows 反斜杠路径使用 TOML 单引号，避免转义；以下为相对路径版本：
+### Linux Bash
+
+```bash
+uv run access-docs run \
+  --source-root /srv/project/source \
+  --document-root /srv/project/docs \
+  --log-file /srv/project/logs/form.log \
+  --lookup-ref-csv-path /srv/project/lookup.csv \
+  --table-file-folder-path /srv/project/schema/tables_views \
+  --sys-prompt-directory /srv/project/prompts/access \
+  --ui-user-prompt-directory /srv/project/prompts/access/ui_user_prompts \
+  --vba-user-prompt-directory /srv/project/prompts/access/vba_user_prompts \
+  --system-id rms --env-id prod
+```
+
+### Windows CMD
+
+```bat
+uv run access-docs run ^
+  --source-root "C:\project\source" ^
+  --document-root "C:\project\docs" ^
+  --log-file "C:\project\logs\form.log" ^
+  --lookup-ref-csv-path "C:\project\lookup.csv" ^
+  --table-file-folder-path "C:\project\schema\tables_views" ^
+  --sys-prompt-directory "C:\project\prompts\access" ^
+  --ui-user-prompt-directory "C:\project\prompts\access\ui_user_prompts" ^
+  --vba-user-prompt-directory "C:\project\prompts\access\vba_user_prompts" ^
+  --system-id rms --env-id prod
+```
+
+Linux 用 `\` 续行，CMD 用 `^`，PowerShell 用反引号（`` ` ``）；续行符后不要加空格。
+CMD 参数使用双引号，反斜杠无需双写，带引号的目录路径建议省略末尾反斜杠。
+也可以将全部参数写在同一行，去掉续行符。
+
+## 配置内容
+
+以下为 Windows 配置，所有字段都需填写：
 
 ```toml
 [variables]
-prompt_root = "../prompts/access"
+prompt_root = 'C:\project\prompts\access'
 
 [project]
 system_id = "rms"
 env_id = "prod"
 
 [paths]
-source_root = "../workspace/rmsdev"
-document_root = "../specs/access"
-log_file = "../logs/form.log"
-lookup_ref_csv_path = "../lookup_ref1.csv"
-table_file_folder_path = "../schema/tables_views"
+source_root = 'C:\project\source'
+document_root = 'C:\project\docs'
+log_file = 'C:\project\logs\form.log'
+lookup_ref_csv_path = 'C:\project\lookup.csv'
+table_file_folder_path = 'C:\project\schema\tables_views'
 
 [prompts]
-sys_prompt_directory = "${prompt_root}"
-ui_user_prompt_directory = "${prompt_root}/ui_user_prompts"
-vba_user_prompt_directory = "${prompt_root}/vba_user_prompts"
+sys_prompt_directory = '${prompt_root}'
+ui_user_prompt_directory = '${prompt_root}\ui_user_prompts'
+vba_user_prompt_directory = '${prompt_root}\vba_user_prompts'
 ```
 
-所有业务字段必填。源码、lookup CSV、表结构路径、三个 Prompt 路径均声明
-`must_exist=True`；文档目录和日志文件允许尚不存在。只检查路径存在性，不额外校验文件类型、
-CSV 内容或 Prompt 格式，这些属于原服务。相对路径基于配置文件目录，变量只展开一次，
-不读取环境变量；通用加载规则详见 [README](README.md)。
+| 配置项 | 用途 |
+| --- | --- |
+| `system_id` / `env_id` | 系统和环境标识 |
+| `source_root` | 待分析源码位置 |
+| `document_root` | 文档输出位置 |
+| `log_file` | 运行日志文件 |
+| `lookup_ref_csv_path` | 界面关联参考 CSV |
+| `table_file_folder_path` | 表结构资料位置 |
+| `sys_prompt_directory` | 系统 Prompt 位置 |
+| `ui_user_prompt_directory` | 界面分析 Prompt 位置 |
+| `vba_user_prompt_directory` | VBA 入口分析 Prompt 位置 |
 
-## 固定流程与错误
+Linux 配置将路径改为 `/srv/project/...`，例如
+`prompt_root = "/srv/project/prompts/access"` 和
+`ui_user_prompt_directory = "${prompt_root}/ui_user_prompts"`。
+Windows TOML 推荐单引号反斜杠或双引号正斜杠，不要直接写 `"C:\project\source"`。
+更多路径写法和变量规则见 [PL/SQL 使用指南](README.md#toml-中的-windows-路径)。
 
-1. 加载和校验 TOML，初始化日志、AccessConfig、Workbench 和 AccessService。
-2. 初始化 tracing，调用 `analyze_form_ui()`，获得 `form_lookup_mapping` 和 UI 错误标志。
-3. 将同一个 mapping 原样传给 `analyze_entrys()`；方法拼写保留原服务 API。
-4. 累计两个错误标志；全部成功才 publish 一次，成功后记录日志。
-5. tracing 初始化成功后，无论生成/发布结果如何，都通过 finally 尝试 shutdown。
+## 运行前注意与结果
 
-返回 0 表示分析和发布成功，1 表示任一分析阶段返回错误标志而未发布，2 表示参数或配置错误。
-UI 正常返回错误标志时仍运行入口分析；异常则立即停止并传播，不发布。UI 失败时 mapping
-是否可供入口分析使用须在真实服务确认。无效的非 bool 错误标志明确抛 TypeError。
-失败时不主动删除检查点、不推进 baseline、不承诺发布事务或自动回滚。
-Workbench 位于 `document_root/.workbench`，按原接口保护源码目录；不并发共用 Workbench。
+所有业务路径必须是本机绝对路径，`--config` 文件位置可以相对。源码、CSV、表结构资料和
+三个 Prompt 路径必须已存在；文档输出目录和日志文件可以尚不存在。参数名必须写完整，
+字段不能为空，不在配置文件中放密钥。
 
-本仓库没有真实 processor/infra，可以验证 help、配置和替身测试，但完整运行会明确报缺失依赖：
+不要同时运行多个命令写入同一文档输出目录。失败时保留 `document_root/.workbench`，
+查看日志并修正问题后重试；修改输入或配置后，需确认原有进度仍适用。
 
-```bash
-uv run --project examples/plsql_cli access-docs run --help
-uv run --project examples/plsql_cli pytest examples/plsql_cli/tests/test_access_cli.py -q
-```
+| 退出码 | 含义 |
+| --- | --- |
+| `0` | 分析和发布成功 |
+| `1` | 分析阶段报告失败，未发布；查看日志 |
+| `2` | 参数或配置错误；按终端提示修正 |
 
-复制后仍需真实项目验收 UI mapping、入口分析、恢复检查点和发布行为。
+其他异常会显示错误信息并以非零状态退出。若错误发生在发布过程中，请检查输出文件，
+不保证自动回滚。

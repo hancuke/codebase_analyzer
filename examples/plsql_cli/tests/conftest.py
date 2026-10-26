@@ -12,10 +12,11 @@ def config_path(tmp_path: Path) -> Path:
         (root / "prompts" / name).mkdir(parents=True)
     path = root / "plsql-docs.toml"
     path.write_text(
-        '[variables]\nprompt_root = "prompts"\n'
+        f'[variables]\nprompt_root = "{root.as_posix()}/prompts"\n'
         '[project]\nsystem_id = "rms"\nenv_id = "prod"\n'
-        '[paths]\nsource_root = "source"\ndocument_root = "docs"\n'
-        'log_file = "logs/plsql.log"\n'
+        f'[paths]\nsource_root = "{root.as_posix()}/source"\n'
+        f'document_root = "{root.as_posix()}/docs"\n'
+        f'log_file = "{root.as_posix()}/logs/plsql.log"\n'
         '[prompts]\nsys_prompt_directory = "${prompt_root}"\n'
         'simple_user_prompt_directory = "${prompt_root}/simple_user_prompts"\n'
         'complex_user_prompt_directory = "${prompt_root}/complex_user_prompts"\n'

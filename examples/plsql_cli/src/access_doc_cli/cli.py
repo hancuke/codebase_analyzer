@@ -8,19 +8,19 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from plsql_doc_cli.validation import ConfigError, load_config
+from plsql_doc_cli.validation import ConfigError, add_arguments, load_arguments, load_config
 
 
 @dataclass
 class RunOptions:
-    source_root: Path = field(metadata={"section": "paths", "must_exist": True})
-    document_root: Path = field(metadata={"section": "paths"})
-    log_file: Path = field(metadata={"section": "paths"})
-    lookup_ref_csv_path: Path = field(metadata={"section": "paths", "must_exist": True})
-    table_file_folder_path: Path = field(metadata={"section": "paths", "must_exist": True})
-    sys_prompt_directory: Path = field(metadata={"section": "prompts", "must_exist": True})
-    ui_user_prompt_directory: Path = field(metadata={"section": "prompts", "must_exist": True})
-    vba_user_prompt_directory: Path = field(metadata={"section": "prompts", "must_exist": True})
+    source_root: Path = field(metadata={"section": "paths", "absolute": True, "must_exist": True})
+    document_root: Path = field(metadata={"section": "paths", "absolute": True})
+    log_file: Path = field(metadata={"section": "paths", "absolute": True})
+    lookup_ref_csv_path: Path = field(metadata={"section": "paths", "absolute": True, "must_exist": True})
+    table_file_folder_path: Path = field(metadata={"section": "paths", "absolute": True, "must_exist": True})
+    sys_prompt_directory: Path = field(metadata={"section": "prompts", "absolute": True, "must_exist": True})
+    ui_user_prompt_directory: Path = field(metadata={"section": "prompts", "absolute": True, "must_exist": True})
+    vba_user_prompt_directory: Path = field(metadata={"section": "prompts", "absolute": True, "must_exist": True})
     system_id: str = field(metadata={"section": "project"})
     env_id: str = field(metadata={"section": "project"})
 
@@ -34,13 +34,16 @@ def load_options(config_path: Path) -> RunOptions:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="access-docs", description=__doc__)
+    parser = argparse.ArgumentParser(prog="access-docs", description=__doc__, allow_abbrev=False)
     commands = parser.add_subparsers(dest="command", required=True)
-    run_parser = commands.add_parser("run", help="Analyze UI and entries, then publish on success.")
-    run_parser.add_argument(
-        "--config", type=Path, default=Path("access-docs.toml"),
-        help="Project TOML (default: access-docs.toml in the current directory).",
+    run_parser = commands.add_parser(
+        "run", help="Analyze UI and entries, then publish on success.", allow_abbrev=False,
     )
+    run_parser.add_argument(
+        "--config", type=Path,
+        help="Project TOML; omit to supply all business fields on the command line.",
+    )
+    add_arguments(run_parser, RunOptions)
     return parser
 
 
@@ -105,7 +108,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
-        options = load_options(args.config)
+        options = load_arguments(args, RunOptions)
     except ConfigError as error:
         parser.error(str(error))
     return run(options)

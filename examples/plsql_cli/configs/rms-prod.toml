@@ -1,3 +1,4 @@
+# Windows example: replace business paths with native absolute paths on other platforms.
 [variables]
 prompt_root = "C:/access-doc/example/plsql/prompts"
 

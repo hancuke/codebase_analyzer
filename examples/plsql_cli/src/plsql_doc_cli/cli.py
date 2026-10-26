@@ -1,4 +1,4 @@
-"""Run both PL/SQL documentation stages using a project TOML file."""
+"""Run both PL/SQL documentation stages using TOML or command-line options."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
-from plsql_doc_cli.validation import ConfigError, load_config
+from plsql_doc_cli.validation import ConfigError, add_arguments, load_arguments, load_config
 
 
 class Detail(str, Enum):
@@ -18,13 +18,13 @@ class Detail(str, Enum):
 
 @dataclass
 class RunOptions:
-    source_root: Path = field(metadata={"section": "paths", "must_exist": True})
-    document_root: Path = field(metadata={"section": "paths"})
-    sys_prompt_directory: Path = field(metadata={"section": "prompts", "must_exist": True})
-    simple_user_prompt_directory: Path = field(metadata={"section": "prompts", "must_exist": True})
-    complex_user_prompt_directory: Path = field(metadata={"section": "prompts", "must_exist": True})
-    special_user_prompts: Path = field(metadata={"section": "prompts", "must_exist": True})
-    log_file: Path = field(metadata={"section": "paths"})
+    source_root: Path = field(metadata={"section": "paths", "absolute": True, "must_exist": True})
+    document_root: Path = field(metadata={"section": "paths", "absolute": True})
+    sys_prompt_directory: Path = field(metadata={"section": "prompts", "absolute": True, "must_exist": True})
+    simple_user_prompt_directory: Path = field(metadata={"section": "prompts", "absolute": True, "must_exist": True})
+    complex_user_prompt_directory: Path = field(metadata={"section": "prompts", "absolute": True, "must_exist": True})
+    special_user_prompts: Path = field(metadata={"section": "prompts", "absolute": True, "must_exist": True})
+    log_file: Path = field(metadata={"section": "paths", "absolute": True})
     system_id: str = field(metadata={"section": "project"})
     env_id: str = field(metadata={"section": "project"})
     exclude: tuple[str, ...] = field(metadata={"section": "patterns"})
@@ -41,13 +41,16 @@ def load_options(config_path: Path) -> RunOptions:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="plsql-docs", description=__doc__)
+    parser = argparse.ArgumentParser(prog="plsql-docs", description=__doc__, allow_abbrev=False)
     commands = parser.add_subparsers(dest="command", required=True)
-    run_parser = commands.add_parser("run", help="Generate documentation and publish on success.")
-    run_parser.add_argument(
-        "--config", type=Path, default=Path("plsql-docs.toml"),
-        help="Project TOML (default: plsql-docs.toml in the current directory).",
+    run_parser = commands.add_parser(
+        "run", help="Generate documentation and publish on success.", allow_abbrev=False,
     )
+    run_parser.add_argument(
+        "--config", type=Path,
+        help="Project TOML; omit to supply all business fields on the command line.",
+    )
+    add_arguments(run_parser, RunOptions)
     run_parser.add_argument(
         "--detail", choices=[item.value for item in Detail], default=Detail.SUMMARY.value,
         help="Completion output detail; does not change generation (default: summary).",
@@ -120,7 +123,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
-        options = load_options(args.config)
+        options = load_arguments(args, RunOptions)
     except ConfigError as error:
         parser.error(str(error))
     options.detail = Detail(args.detail)

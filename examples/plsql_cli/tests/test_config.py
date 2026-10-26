@@ -14,7 +14,7 @@ def load(path: Path):
     return load_options(path)
 
 
-def test_config_paths_are_relative_to_file_not_cwd(config_path, tmp_path, monkeypatch):
+def test_config_absolute_paths_are_independent_of_cwd(config_path, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     options = load(config_path)
     assert options.source_root == config_path.parent / "source"
@@ -38,9 +38,10 @@ def test_run_options_can_be_updated_after_loading(config_path):
     assert load(config_path).detail is cli.Detail.SUMMARY
 
 
-def test_config_defaults_and_default_filename(config_path, monkeypatch):
+def test_config_requires_explicit_filename(config_path, monkeypatch):
     monkeypatch.chdir(config_path.parent)
-    options = load_options(build_parser().parse_args(["run"]).config)
+    assert build_parser().parse_args(["run"]).config is None
+    options = load_options(build_parser().parse_args(["run", "--config", config_path.name]).config)
     assert options.exclude == ("normal_*",)
     assert options.include_special == ("special_*",)
     text = config_path.read_text().split("[patterns]")[0]
@@ -67,6 +68,8 @@ def test_empty_exclusions_in_config(config_path):
     ('include_special = ["special_*"]', 'include_special = [""]', "non-empty"),
 ])
 def test_invalid_configuration(config_path, old, new, message):
+    old = old.replace('"source"', f'"{config_path.parent.as_posix()}/source"')
+    new = new.replace('"missing"', f'"{config_path.parent.as_posix()}/missing"')
     config_path.write_text(config_path.read_text().replace(old, new))
     with pytest.raises(ConfigError, match=message):
         load(config_path)
@@ -89,7 +92,10 @@ def test_configured_prompt_paths_must_exist(config_path):
 
 @pytest.mark.skipif(os.name == "nt", reason="Windows paths are native on Windows")
 def test_foreign_windows_path(config_path):
-    config_path.write_text(config_path.read_text().replace('source_root = "source"', 'source_root = "C:/workspace/src"'))
+    config_path.write_text(config_path.read_text().replace(
+        f'source_root = "{config_path.parent.as_posix()}/source"',
+        'source_root = "C:/workspace/src"',
+    ))
     with pytest.raises(ConfigError, match="Windows path"):
         load(config_path)
 
@@ -114,8 +120,7 @@ def test_input_error_exit_code_and_no_imports(config_path, case, capsys):
 
 
 @pytest.mark.parametrize("flag", [
-    "--mode", "--exclude", "--include", "--source-root",
-    "--document-root", "--prompt-root", "--log-file",
+    "--mode", "--include", "--prompt-root",
 ])
 def test_removed_overrides_are_rejected(config_path, flag, capsys):
     with pytest.raises(SystemExit) as error:
