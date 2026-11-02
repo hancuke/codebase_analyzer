@@ -4,7 +4,8 @@ import re
 from collections import defaultdict
 from dataclasses import dataclass, replace
 from pathlib import PurePosixPath
-from typing import Sequence
+from types import MappingProxyType
+from typing import Mapping, Sequence
 
 from .model import Constant, Diagnostic, Function, SourceFile, SourceRange
 
@@ -124,23 +125,6 @@ def _parameters(header: str) -> str:
     return ""
 
 
-def _module_kind(file: SourceFile) -> str:
-    path = PurePosixPath(file.source_id)
-    suffix = path.suffix.casefold()
-    if suffix == ".bas" or (
-        suffix == ".txt" and path.stem.casefold().startswith("module_")
-    ):
-        return "standard"
-    if suffix in {".cls", ".frm"} or (
-        suffix == ".txt" and path.stem.casefold().startswith("form_")
-    ) or re.search(
-        r"(?im)^\s*(?:VERSION\s+[\d.]+\s+CLASS|Attribute\s+VB_PredeclaredId)",
-        file.content,
-    ):
-        return "instance"
-    return "unknown"
-
-
 def _function_uses(function: Function) -> tuple[set[str], tuple[_Statement, ...]]:
     statements = _statements(function.source)
     shadowed = {function.name.casefold()}
@@ -170,23 +154,39 @@ def _function_uses(function: Function) -> tuple[set[str], tuple[_Statement, ...]
 
 
 @dataclass(frozen=True)
+class _ConstantDeclaration:
+    source_id: str
+    # None retains an unsupported declaration as a resolution blocker.
+    constant: Constant | None
+
+
+@dataclass(frozen=True)
 class _ConstantIndex:
-    by_name: dict[str, list[Constant]]
-    modules: dict[str, list[SourceFile]]
-    shadowed: dict[str, set[str]]
-    uncertain: dict[str, list[tuple[str, str]]]
-    kinds: dict[str, str]
+    module_constants: Mapping[str, Mapping[str, tuple[_ConstantDeclaration, ...]]]
+    public_constants: Mapping[str, tuple[_ConstantDeclaration, ...]]
+    modules: Mapping[str, tuple[str, ...]]
+    shadowed: Mapping[str, frozenset[str]]
     diagnostics: tuple[Diagnostic, ...]
 
 
 def _collect_constants(files: Sequence[SourceFile]) -> _ConstantIndex:
-    by_name: dict[str, list[Constant]] = defaultdict(list)
     by_file: dict[str, list[Constant]] = defaultdict(list)
-    modules: dict[str, list[SourceFile]] = defaultdict(list)
+    module_constants: dict[str, dict[str, list[_ConstantDeclaration]]] = {
+        file.source_id: defaultdict(list) for file in files
+    }
+    public_constants: dict[str, list[_ConstantDeclaration]] = defaultdict(list)
+    modules: dict[str, list[str]] = defaultdict(list)
     globals_by_file: dict[str, set[str]] = defaultdict(set)
-    uncertain: dict[str, list[tuple[str, str]]] = defaultdict(list)
-    kinds = {file.source_id: _module_kind(file) for file in files}
     diagnostics: list[Diagnostic] = []
+
+    def record(
+        name: str, source_id: str, visibility: str,
+        constant: Constant | None = None,
+    ) -> None:
+        declaration = _ConstantDeclaration(source_id, constant)
+        module_constants[source_id][name].append(declaration)
+        if visibility == "public":
+            public_constants[name].append(declaration)
 
     def diagnose(
         code: str, message: str, source_id: str, line: int,
@@ -198,7 +198,7 @@ def _collect_constants(files: Sequence[SourceFile]) -> _ConstantIndex:
 
     for file in sorted(files, key=lambda item: item.source_id):
         module = PurePosixPath(file.source_id).stem
-        modules[module.casefold()].append(file)
+        modules[module.casefold()].append(file.source_id)
         lines = file.content.splitlines(keepends=True)
         in_procedure = False
         in_enum = False
@@ -246,6 +246,10 @@ def _collect_constants(files: Sequence[SourceFile]) -> _ConstantIndex:
                 if declaration:
                     globals_by_file[file.source_id].update(_names(declaration.group(1)))
                 continue
+            visibility = (
+                "public" if (match.group(1) or "").casefold()
+                in {"public", "global"} else "private"
+            )
             if conditional_depth:
                 diagnose(
                     "unsupported_constant_declaration",
@@ -253,9 +257,7 @@ def _collect_constants(files: Sequence[SourceFile]) -> _ConstantIndex:
                     file.source_id, statement.line,
                 )
                 for name in _names(match.group(2)):
-                    uncertain[name].append((
-                        file.source_id, (match.group(1) or "private").casefold()
-                    ))
+                    record(name, file.source_id, visibility)
                 continue
             for part in _parts(match.group(2)):
                 parsed = re.fullmatch(
@@ -271,9 +273,7 @@ def _collect_constants(files: Sequence[SourceFile]) -> _ConstantIndex:
                         file.source_id, statement.line,
                     )
                     for name in _names(part):
-                        uncertain[name].append((
-                            file.source_id, (match.group(1) or "private").casefold()
-                        ))
+                        record(name, file.source_id, visibility)
                     continue
                 name, type_name, expression = parsed.groups()
                 constant = Constant(
@@ -281,11 +281,10 @@ def _collect_constants(files: Sequence[SourceFile]) -> _ConstantIndex:
                     source_id=file.source_id,
                     source="".join(lines[statement.line - 1:statement.end_line]),
                     source_range=SourceRange(statement.line, statement.end_line),
-                    visibility="public" if (match.group(1) or "").casefold()
-                    in {"public", "global"} else "private",
+                    visibility=visibility,
                     type_name=type_name, expression=expression,
                 )
-                by_name[constant.name.casefold()].append(constant)
+                record(constant.name.casefold(), file.source_id, visibility, constant)
                 by_file[file.source_id].append(constant)
 
     for constants in by_file.values():
@@ -301,7 +300,22 @@ def _collect_constants(files: Sequence[SourceFile]) -> _ConstantIndex:
             seen.add(name)
 
     return _ConstantIndex(
-        by_name, modules, globals_by_file, uncertain, kinds, tuple(diagnostics)
+        module_constants=MappingProxyType({
+            source_id: MappingProxyType({
+                name: tuple(declarations) for name, declarations in scope.items()
+            })
+            for source_id, scope in module_constants.items()
+        }),
+        public_constants=MappingProxyType({
+            name: tuple(declarations) for name, declarations in public_constants.items()
+        }),
+        modules=MappingProxyType({
+            name: tuple(source_ids) for name, source_ids in modules.items()
+        }),
+        shadowed=MappingProxyType({
+            file.source_id: frozenset(globals_by_file[file.source_id]) for file in files
+        }),
+        diagnostics=tuple(diagnostics),
     )
 
 
@@ -310,14 +324,11 @@ def attach_constants(
 ) -> tuple[tuple[Function, ...], tuple[Diagnostic, ...]]:
     index = _collect_constants(files)
     diagnostics = list(index.diagnostics)
-    public_files = {
-        source_id for source_id, kind in index.kinds.items() if kind != "instance"
-    }
     enriched: list[Function] = []
     for function in functions:
         shadowed, uses = _function_uses(function)
         blocked = shadowed | index.shadowed[function.source_id]
-        visible_files = public_files | {function.source_id}
+        local_constants = index.module_constants[function.source_id]
         selected: dict[tuple[str, int, str], Constant] = {}
         for statement in uses:
             tokens = [match.group() for match in _TOKEN.finditer(statement.text)]
@@ -325,10 +336,6 @@ def attach_constants(
                 if not _IDENTIFIER.fullmatch(token):
                     continue
                 name = token.rstrip("$%&!#@").casefold()
-                candidates = index.by_name.get(name, [])
-                uncertain = index.uncertain.get(name, [])
-                if not candidates and not uncertain:
-                    continue
                 previous = tokens[position - 1] if position else ""
                 following = tokens[position + 1] if position + 1 < len(tokens) else ""
                 if following in {".", ":="} or following == ":":
@@ -344,33 +351,27 @@ def attach_constants(
                         continue
                     if position >= 3 and tokens[position - 3] in {".", "!"}:
                         continue
-                    module_files = index.modules.get(qualifier, [])
+                    module_files = index.modules.get(qualifier, ())
                     if not module_files:
                         continue
-                    scope_files = {file.source_id for file in module_files}
+                    declarations = tuple(
+                        item for item in index.public_constants.get(name, ())
+                        if item.source_id in module_files
+                        and item.source_id != function.source_id
+                    )
+                    if function.source_id in module_files:
+                        declarations += local_constants.get(name, ())
                 else:
                     if name in blocked:
                         continue
-                    has_local = any(
-                        item.source_id == function.source_id for item in candidates
-                    ) or any(
-                        source_id == function.source_id
-                        for source_id, _ in uncertain
+                    declarations = local_constants.get(
+                        name, index.public_constants.get(name, ())
                     )
-                    scope_files = {function.source_id} if has_local else visible_files
-                allowed = scope_files & visible_files
                 candidates = [
-                    item for item in candidates
-                    if item.source_id in allowed
-                    and (item.source_id == function.source_id or item.visibility == "public")
-                ]
-                uncertain_sources = [
-                    source_id for source_id, visibility in uncertain
-                    if source_id in allowed
-                    and (source_id == function.source_id or visibility in {"public", "global"})
+                    item.constant for item in declarations if item.constant is not None
                 ]
                 line = function.source_range.start_line + statement.line - 1
-                if uncertain_sources:
+                if any(item.constant is None for item in declarations):
                     code = "unresolved_constant"
                     message = f"Unsupported declarations prevent resolving VBA constant {token!r}."
                 elif not candidates:
@@ -385,12 +386,6 @@ def attach_constants(
                     if len(index.modules[constant.module.casefold()]) != 1:
                         code = "ambiguous_constant"
                         message = f"More than one VBA source uses module name {constant.module!r}."
-                    elif (
-                        constant.source_id != function.source_id
-                        and index.kinds[constant.source_id] == "unknown"
-                    ):
-                        code = "unknown_constant_module"
-                        message = f"Cannot establish standard-module visibility for {token!r}."
                     else:
                         selected[(
                             constant.source_id, constant.source_range.start_line,

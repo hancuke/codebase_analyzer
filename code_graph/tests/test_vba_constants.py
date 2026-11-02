@@ -57,7 +57,7 @@ def test_cross_module_visibility_and_qualified_names_are_deterministic() -> None
     first = analyze(*files)
     second = analyze(*reversed(files))
     function = first.function("vba:Use:Run")
-    assert names(function) == ["COUNT", "FLAG"]
+    assert names(function) == ["COUNT", "FLAG", "CLASS_VALUE", "FORM_VALUE"]
     assert function == second.function(function.id)
     assert first.diagnostics == second.diagnostics
 
@@ -111,7 +111,7 @@ def test_multiconstant_continuation_preserves_original_declaration() -> None:
     assert "    B = 2\n" in function.constants[0].source
 
 
-def test_ambiguous_and_unknown_module_references_are_diagnosed_not_attached() -> None:
+def test_ambiguous_references_are_diagnosed_and_txt_public_constants_resolve() -> None:
     codebase = analyze(
         SourceFile("A.bas", "Public Const CLASH = 1\n"),
         SourceFile("B.bas", "Public Const CLASH = 2\n"),
@@ -119,11 +119,9 @@ def test_ambiguous_and_unknown_module_references_are_diagnosed_not_attached() ->
         SourceFile("Use.bas", "Sub Run()\nDebug.Print CLASH, UNKNOWN\nEnd Sub\n"),
     )
     function = codebase.function("vba:Use:Run")
-    assert function.constants == ()
+    assert names(function) == ["UNKNOWN"]
     diagnostics = [item for item in codebase.diagnostics if item.function_id == function.id]
-    assert {item.code for item in diagnostics} == {
-        "ambiguous_constant", "unknown_constant_module",
-    }
+    assert [item.code for item in diagnostics] == ["ambiguous_constant"]
     assert all(item.line == 2 for item in diagnostics)
 
 
@@ -134,6 +132,53 @@ def test_txt_module_exports_and_instance_local_constants() -> None:
                    "Sub Run_Click()\nDebug.Print LIMIT, CAPTION\nEnd Sub\n", language="vba"),
     )
     assert names(codebase.function("vba:Form_Use:Run_Click")) == ["CAPTION", "LIMIT"]
+
+
+@pytest.mark.parametrize("source_id", [
+    "Settings.bas", "Settings.cls", "Settings.frm", "Settings.txt",
+    "Module_Settings.txt", "Form_Settings.txt",
+])
+@pytest.mark.parametrize("header", [
+    "", "VERSION 1.0 CLASS\n", "Attribute VB_PredeclaredId = True\n",
+])
+def test_visibility_depends_only_on_declarations(source_id, header) -> None:
+    module = source_id.rsplit(".", 1)[0]
+    codebase = analyze(
+        SourceFile(
+            source_id,
+            header + "Public Const SHARED = 1\nGlobal Const LEGACY = 2\n"
+            "Private Const HIDDEN = 3\nConst LOCAL = 4\n"
+            "Sub Own()\n"
+            f"Debug.Print SHARED, LEGACY, HIDDEN, {module}.LOCAL\nEnd Sub\n",
+            language="vba",
+        ),
+        SourceFile(
+            "Use.bas",
+            "Sub Run()\nDebug.Print SHARED, LEGACY, HIDDEN, LOCAL\n"
+            f"Debug.Print {module}.SHARED, {module}.LEGACY, "
+            f"{module}.HIDDEN, {module}.LOCAL\nEnd Sub\n",
+        ),
+    )
+    own = codebase.function(f"vba:{module}:Own")
+    foreign = codebase.function("vba:Use:Run")
+    assert names(own) == ["SHARED", "LEGACY", "HIDDEN", "LOCAL"]
+    assert names(foreign) == ["SHARED", "LEGACY"]
+    assert [item.visibility for item in own.constants] == [
+        "public", "public", "private", "private",
+    ]
+    assert not [item for item in codebase.diagnostics if "constant" in item.code]
+
+
+def test_private_unsupported_declarations_do_not_block_foreign_public_constants() -> None:
+    codebase = analyze(
+        SourceFile("Private.txt", "Private Const LIMIT\nConst OTHER\n", language="vba"),
+        SourceFile("Public.txt", "Public Const LIMIT = 1\nPublic Const OTHER = 2\n",
+                   language="vba"),
+        SourceFile("Use.bas", "Sub Run()\nDebug.Print LIMIT, OTHER\nEnd Sub\n"),
+    )
+    function = codebase.function("vba:Use:Run")
+    assert names(function) == ["LIMIT", "OTHER"]
+    assert not [item for item in codebase.diagnostics if item.function_id == function.id]
 
 
 def test_conditional_and_malformed_constants_emit_diagnostics() -> None:

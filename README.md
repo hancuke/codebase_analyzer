@@ -44,6 +44,31 @@ file_tracker       code_graph
 
 ## Minimal APIs
 
+### VBA constant references
+
+`VbaAnalyzer` 先扫描完整源码中的模块级 `Const` 声明，再将函数直接引用的常量放入
+`Function.constants`。按源文件建立模块内声明索引，并另建公共声明索引：
+`Private Const` 和未修饰的 `Const` 仅在当前模块可见，`Public Const`（兼容 `Global Const`）
+可跨模块引用。可见性只由声明决定，不根据文件扩展名、文件名前缀或导出头推断。
+这是本分析器的简化规则，不模拟 VBA 类或窗体的实例成员访问语义。
+
+```python
+from codegraph import Codebase, SourceFile, VbaAnalyzer
+
+codebase = Codebase.analyze(
+    [
+        SourceFile("Settings.txt", "Public Const LIMIT = 10\n", language="vba"),
+        SourceFile("Use.bas", "Sub Run()\nDebug.Print LIMIT\nEnd Sub\n"),
+    ],
+    [VbaAnalyzer()],
+)
+assert codebase.function("vba:Use:Run").constants[0].expression == "10"
+```
+
+解析保留参数和局部声明遮蔽、同模块优先、模块限定名及重名歧义诊断。
+无法可靠解析的声明也保留在对应索引中，阻止错误地回退到其他同名常量。
+返回的常量保留原始声明和位置，按源文件、声明行和名称确定性排序。
+
 ### Code change to affected Entries
 
 ```python
